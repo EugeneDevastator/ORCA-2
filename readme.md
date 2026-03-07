@@ -128,14 +128,14 @@ An operator writing right AND down does both simultaneously. Bottom write is fir
        [7]       [14]         ← SUMR writes 7 right into MULR, MULR writes 7×2=14 down
 ```
 
-## types
+# types
 - Number - always signed float.
 - text  - a symbol, not a real string, used for variable names, coments, etc.
 - /var - resolves variable to a number or reference.
 	- some references can be hidden, for ex `GET x entity` - will get x value of entity.
 	- both x and entity - are hidden, but exposed as text.
 	
-### Nulls
+## Nulls
 There is no nulls. most i can think of is emitting -0 (minus zero) as replacement for a null. but no NO FUCKING NULLS AND NULL CHECKS.
 
 ## References
@@ -176,8 +176,8 @@ b : 14 >> a
 a : 14
 a: 14 // shorthand for value read.
 :a    // doesnt execute on its own, unless holds operator.
-LISTR :a b
-[]: 14 b
+LISTD :a b
+[] : 14 b
 
 
 
@@ -191,9 +191,10 @@ list variables can be formed like this:
 a b c d f LISTR []
 
 LIST a b c d f g h |
-[]
+[] >> a // great no we have recursive list :D
 
-[] UNFOLDR a b c d e f g h   // will write list to the right. can also do down
+a : a b c d f g h   // will write list to the right. can also do down
+ // note that this unfold is still valid. and a still holds the list
 ```
 
 Any operations that dont expect list will operate on first element or 0.
@@ -222,7 +223,7 @@ SET cmd lock
     *
 cmd SWITCHD
     act
-    lock * TWEEN_TO ENTITY CEIL Z someheight 2
+    lock * TWEEN_TO PROP_ENTITY_CEIL_Z someheight 2 // over 2 sec
          R * PRINT 'hey hey'
     
     nop
@@ -255,3 +256,27 @@ ENDEF
 - RR means it will write many potentially corrupting rest of row.
 - _D means it will output down. can take l,r,up
 - no suffix = default Orca func - read l AND r, write down.
+
+
+
+
+# Processes.
+processes have few things  to keep:  
+- they run internally, regardless of bang.
+- loop is a process. even tho it apparently executes in same frame
+
+## Loops
+
+```
+/fibonacci n
+SET a 1
+SET b 1
+LOOP 4   // whenever in same tick compiler encounters it will be in same tick.
+	SUMD a b
+	? SETTO c
+	b >> a
+	c >> b
+	c ]] res // pushes into the list implicitly. var becomes list if it isnt.
+ENDL
+RETD res
+```
