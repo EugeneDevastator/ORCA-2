@@ -6,9 +6,9 @@
 ## Execution Model
 
 - Grid scans **left to right**, **top to bottom**, once per tick
-- Every cell executes exactly once per tick
+- Every cell executes exactly once per tick - improve with execution on change only.
 - Writes are **collected during scan**, applied **after full scan completes**
-- No operator reads from below — bottom is write-only
+- No operator reads from below — bottom is write-only 
 
 ---
 
@@ -51,7 +51,8 @@ An operator writing right AND down does both simultaneously. Bottom write is fir
 |---|---|
 | `R` | next cell to the right |
 | `D` | cell directly below |
-
+| none | reads Left and Right, writes below. default Orca like behavior |
+						  
 ---
 
 ## Cell Expansion
