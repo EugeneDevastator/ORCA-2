@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Grid Lang</title>
+<style>
+  body { background: #1a1a1a; color: #ccc; font-family: monospace; margin: 20px; }
+  h2 { color: #fff; }
+  #grid-container { overflow: auto; margin-bottom: 16px; }
+  table { border-collapse: collapse; }
+  td { border: 1px solid #333; padding: 0; min-width: 60px; height: 28px; position: relative; }
+  td.expanded { background: #1e2a1e; }
+  td.empty { background: #111; }
+  td.number-cell { background: #1a1a2e; }
+  td.operator-cell { background: #2a1a1a; }
+  td.string-cell { background: #1a2a2a; }
+  td.result-cell { background: #2a2a1a; }
+  td input {
+    width: 100%; height: 100%; background: transparent; border: none;
+    color: #ccc; font-family: monospace; font-size: 13px;
+    padding: 2px 4px; box-sizing: border-box; outline: none;
+  }
+  td.selected { outline: 2px solid #888; }
+  td.expanded-hidden { display: none; }
+  #controls { margin-bottom: 12px; }
+  button { background: #333; color: #ccc; border: 1px solid #555; padding: 4px 10px; margin-right: 6px; cursor: pointer; font-family: monospace; }
+  button:hover { background: #444; }
+  #log { background: #111; border: 1px solid #333; padding: 8px; height: 120px; overflow-y: auto; font-size: 12px; }
+  .log-tick { color: #888; }
+  .log-write { color: #8f8; }
+  .log-error { color: #f88; }
+  #tick-display { color: #aaa; font-size: 13px; margin-left: 12px; }
+  td span.cell-label {
+    display: block; width: 100%; height: 100%;
+    padding: 2px 4px; box-sizing: border-box;
+    font-size: 13px; white-space: nowrap; overflow: hidden;
+    cursor: pointer; line-height: 24px;
+  }
+  td.expanded span.cell-label { color: #6f6; }
+  td.number-cell span.cell-label { color: #6af; }
+  td.operator-cell span.cell-label { color: #fa6; }
+  td.result-cell span.cell-label { color: #ff6; }
+  td.string-cell span.cell-label { color: #a6f; }
+</style>
+</head>
+<body>
+<h2>Grid Lang Demo</h2>
+<div id="controls">
+  <button onclick="tick()">Tick</button>
+  <button onclick="toggleRun()">Run</button>
+  <button onclick="resetGrid()">Reset</button>
+  <button onclick="loadExample()">Load Example</button>
+  <span id="tick-display">tick: 0</span>
+</div>
+<div id="grid-container"></div>
+<div style="margin-bottom:6px; font-size:12px; color:#888;">
+  Click cell to edit. Prefix: number=number, else=string/operator. Operators: SUMD SUMR MULD MULR IFGR PICKD F
+</div>
+<div id="log"></div>
+
+<script>
+const ROWS = 10;
+const COLS = 20;
+
+// grid[r][c] = { value: string, expandRight: number (how many extra cols it spans) }
+let grid = [];
+let tickCount = 0;
+let running = false;
+let runInterval = null;
+let selectedCell = null;
+
+const OPERATORS = ['SUMD','SUMR','MULD','MULR','IFGR','PICKD','F'];
+
+function initGrid() {
+  grid = [];
+  for (let r = 0; r < ROWS; r++) {
+    grid[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      grid[r][c] = { value: '', expandRight: 0 };
+    }
+  }
+}
+
+function isOperator(v) {
+  return OPERATORS.includes(v.trim().toUpperCase());
+}
+
+function isNumber(v) {
+  return v.trim() !== '' && !isNaN(Number(v.trim()));
+}
+
+function cellType(v) {
+  if (v === '' || v === '.') return 'empty';
+  if (isNumber(v)) return 'number-cell';
+  if (isOperator(v)) return 'operator-cell';
+  return 'string-cell';
+}
+
+// Find the logical cell owner for column c in row r (handles expanded cells)
+function getOwner(r, c) {
+  // scan left to find if c is inside an expanded cell
+  for (let cc = 0; cc <= c; cc++) {
+    let cell = grid[r][cc];
+    if (cc + cell.expandRight >= c && cc !== c && cell.expandRight > 0) {
+      return cc; // c is inside expanded cell starting at cc
+    }
+  }
+  return c;
+}
+
+// Read value at logical position, returns number or string
+function readVal(r, c) {
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return null;
+  let owner = getOwner(r, c);
+  let v = grid[r][owner].value.trim();
+  if (v === '' || v === '.') return null;
+  if (isNumber(v)) return Number(v);
+  return v;
+}
+
+// Write value to cell (as string)
+function writeVal(r, c, val) {
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+  let owner = getOwner(r, c);
+  grid[r][owner].value = String(val);
+  logWrite(r, owner, val);
+}
+
+let pendingWrites = [];
+
+function scheduleWrite(r, c, val) {
+  pendingWrites.push({ r, c, val });
+}
+
+function flushWrites() {
+  for (let w of pendingWrites) {
+    writeVal(w.r, w.c, w.val);
+  }
+  pendingWrites = [];
+}
+
+function log(msg, cls) {
+  let el = document.getElementById('log');
+  let line = document.createElement('div');
+  line.className = cls || '';
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function logWrite(r, c, val) {
+  log(`  write [${r},${c}] = ${val}`, 'log-write');
+}
+
+// Find next non-empty cell to the right of c in row r
+function nextNonEmpty(r, c) {
+  for (let cc = c + 1; cc < COLS; cc++) {
+    let owner = getOwner(r, cc);
+    if (owner !== cc) continue; // skip inside expanded
+    let v = grid[r][cc].value.trim();
+    if (v !== '' && v !== '.') return cc;
+  }
+  return -1;
+}
+
+// Find Nth non-empty cell to the right of c (1-indexed)
+function nthNonEmpty(r, c, n) {
+  let found = 0;
+  for (let cc = c + 1; cc < COLS; cc++) {
+    let owner = getOwner(r, cc);
+    if (owner !== cc) continue;
+    let v = grid[r][cc].value.trim();
+    if (v !== '' && v !== '.') {
+      found++;
+      if (found === n) return cc;
+    }
+  }
+  return -1;
+}
+
+function tick() {
+  tickCount++;
+  document.getElementById('tick-display').textContent = 'tick: ' + tickCount;
+  log(`--- tick ${tickCount} ---`, 'log-tick');
+
+  pendingWrites = [];
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      // skip if inside expanded cell
+      if (getOwner(r, c) !== c) continue;
+
+      let v = grid[r][c].value.trim().toUpperCase();
+      if (!isOperator(v)) continue;
+
+      // read left neighbors (two cells to the left, skipping empties)
+      // for binary ops: A is 2nd left, B is 1st left (immediate left)
+      let leftVals = [];
+      for (let cc = c - 1; cc >= 0 && leftVals.length < 2; cc--) {
+        let owner = getOwner(r, cc);
+        if (owner !== cc) continue;
+        let lv = grid[r][cc].value.trim();
+        if (lv !== '' && lv !== '.') leftVals.unshift(readVal(r, cc));
+      }
+
+      let A = leftVals.length >= 2 ? leftVals[leftVals.length - 2] : null;
+      let B = leftVals.length >= 1 ? leftVals[leftVals.length - 1] : null;
+
+      // right write target = next cell after operator (accounting for expand)
+      let rightTarget = c + 1 + grid[r][c].expandRight;
+      let downTarget = r + 1;
+
+      switch (v) {
+        case 'SUMR': {
+          if (A !== null && B !== null) {
+            let res = Number(A) + Number(B);
+            scheduleWrite(r, rightTarget, res);
+          }
+          break;
+        }
+        case 'SUMD': {
+          if (A !== null && B !== null) {
+            let res = Number(A) + Number(B);
+            scheduleWrite(downTarget, c, res);
+          }
+          break;
+        }
+        case 'MULR': {
+          if (A !== null && B !== null) {
+            let res = Number(A) * Number(B);
+            scheduleWrite(r, rightTarget, res);
+          }
+          break;
+        }
+        case 'MULD': {
+          if (A !== null && B !== null) {
+            let res = Number(A) * Number(B);
+            scheduleWrite(downTarget, c, res);
+          }
+          break;
+        }
+        case 'IFGR': {
+          // reads 2 left: A > B ? 1 : 0, writes right
+          if (A !== null && B !== null) {
+            let res = Number(A) > Number(B) ? 1 : 0;
+            scheduleWrite(r, rightTarget, res);
+          }
+          break;
+        }
+        case 'PICKD': {
+          // reads 1 left (index, 1-based), picks nth non-empty to the right, writes down
+          if (B !== null) {
+            let idx = Math.round(Number(B));
+            let tc = nthNonEmpty(r, c + grid[r][c].expandRight, idx);
+            if (tc >= 0) {
+              let picked = readVal(r, tc);
+              scheduleWrite(downTarget, c, picked);
+            }
+          }
+          break;
+        }
+        case 'F': {
+          // forward: read left, write to next non-empty cell to the right
+          if (B !== null) {
+            let tc = nextNonEmpty(r, c + grid[r][c].expandRight);
+            if (tc >= 0) {
+              scheduleWrite(r, tc, B);
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  flushWrites();
+  renderGrid();
+}
+
+function toggleRun() {
+  running = !running;
+  if (running) {
+    runInterval = setInterval(tick, 500);
+  } else {
+    clearInterval(runInterval);
+  }
+}
+
+function resetGrid() {
+  running = false;
+  clearInterval(runInterval);
+  tickCount = 0;
+  document.getElementById('tick-display').textContent = 'tick: 0';
+  document.getElementById('log').innerHTML = '';
+  initGrid();
+  renderGrid();
+}
+
+function loadExample() {
+  resetGrid();
+  // Example: 10 25 IFGR 1 PICKD slow fast
+  // if 10 > 25 pick 1st (slow) else pick 2nd (fast), write down
+  // Row 0
+  let row = 0;
+  grid[row][0].value = '10';
+  grid[row][1].value = '25';
+  grid[row][2].value = 'IFGR';
+  grid[row][3].value = '1';
+  grid[row][4].value = 'PICKD';
+  grid[row][5].value = 'slow';
+  grid[row][6].value = 'fast';
+
+  // Row 2: 3 SUMR 4 then MULR 2
+  grid[2][0].value = '3';
+  grid[2][1].value = '4';
+  grid[2][2].value = 'SUMR';
+  grid[2][3].value = '2';
+  grid[2][4].value = 'MULR';
+
+  renderGrid();
+}
+
+function renderGrid() {
+  let container = document.getElementById('grid-container');
+  let html = '<table>';
+  for (let r = 0; r < ROWS; r++) {
+    html += '<tr>';
+    for (let c = 0; c < COLS; c++) {
+      let cell = grid[r][c];
+      let owner = getOwner(r, c);
+      if (owner !== c) {
+        // inside expanded cell, skip
+        html += `<td class="expanded-hidden"></td>`;
+        continue;
+      }
+      let v = cell.value.trim();
+      let span = 1 + cell.expandRight;
+      let type = cellType(v);
+      // check if result (written this tick) - we mark by checking pendingWrites... 
+      // simpler: just use type
+      let sel = (selectedCell && selectedCell.r === r && selectedCell.c === c) ? ' selected' : '';
+      html += `<td class="${type}${sel}" colspan="${span}" data-r="${r}" data-c="${c}" onclick="selectCell(${r},${c})">`;
+      if (selectedCell && selectedCell.r === r && selectedCell.c === c) {
+        html += `<input id="cell-input" value="${cell.value}" onblur="commitCell(${r},${c},this.value)" onkeydown="cellKey(event,${r},${c})" />`;
+      } else {
+        html += `<span class="cell-label">${v === '' ? '&nbsp;' : v}</span>`;
+      }
+      html += '</td>';
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  container.innerHTML = html;
+  if (selectedCell) {
+    let inp = document.getElementById('cell-input');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+}
+
+function selectCell(r, c) {
+  selectedCell = { r, c };
+  renderGrid();
+}
+
+function commitCell(r, c, val) {
+  grid[r][c].value = val;
+  selectedCell = null;
+  renderGrid();
+}
+
+function cellKey(e, r, c) {
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    commitCell(r, c, e.target.value);
+    // move right on tab, down on enter
+    let nr = r, nc = c;
+    if (e.key === 'Tab') nc = Math.min(c + 1, COLS - 1);
+    else nr = Math.min(r + 1, ROWS - 1);
+    selectedCell = { r: nr, c: nc };
+    renderGrid();
+  } else if (e.key === 'Escape') {
+    selectedCell = null;
+    renderGrid();
+  }
+}
+
+initGrid();
+renderGrid();
+</script>
+</body>
+</html>
