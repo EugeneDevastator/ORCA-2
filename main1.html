@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Grid Lang</title>
+<style>
+  body { background: #1a1a1a; color: #ccc; font-family: monospace; margin: 20px; }
+  h2 { color: #fff; }
+  #grid-container { overflow: auto; margin-bottom: 16px; }
+  table { border-collapse: collapse; }
+  td {
+    border: 1px solid #333; padding: 0;
+    width: 16px; height: 16px;
+    min-width: 16px; max-width: 16px;
+    position: relative; overflow: visible;
+  }
+  td.empty { background: #111; }
+  td.number-cell { background: #1a1a2e; }
+  td.operator-cell { background: #2a1a1a; }
+  td.string-cell { background: #1a2a2a; }
+  td.selected { outline: 2px solid #aaa; z-index: 10; }
+  td span.cell-label {
+    display: block;
+    white-space: nowrap;
+    font-size: 13px;
+    line-height: 16px;
+    padding: 0 2px;
+    cursor: pointer;
+    pointer-events: none;
+  }
+  td.empty span.cell-label { color: #333; }
+  td.number-cell span.cell-label { color: #6af; }
+  td.operator-cell span.cell-label { color: #fa6; }
+  td.string-cell span.cell-label { color: #a6f; }
+  td input {
+    position: absolute;
+    top: 0; left: 0;
+    min-width: 80px;
+    height: 16px;
+    background: #222;
+    border: 1px solid #888;
+    color: #fff;
+    font-family: monospace;
+    font-size: 13px;
+    padding: 0 2px;
+    box-sizing: border-box;
+    outline: none;
+    z-index: 20;
+  }
+  #controls { margin-bottom: 12px; }
+  button { background: #333; color: #ccc; border: 1px solid #555; padding: 4px 10px; margin-right: 6px; cursor: pointer; font-family: monospace; }
+  button:hover { background: #444; }
+  #log { background: #111; border: 1px solid #333; padding: 8px; height: 120px; overflow-y: auto; font-size: 12px; }
+  .log-tick { color: #888; }
+  .log-write { color: #8f8; }
+  #tick-display { color: #aaa; font-size: 13px; margin-left: 12px; }
+</style>
+</head>
+<body>
+<h2>Grid Lang Demo</h2>
+<div id="controls">
+  <button onclick="tick()">Tick</button>
+  <button onclick="toggleRun()">Run</button>
+  <button onclick="resetGrid()">Reset</button>
+  <button onclick="loadExample()">Load Example</button>
+  <span id="tick-display">tick: 0</span>
+</div>
+<div id="grid-container"></div>
+<div style="margin-bottom:6px; font-size:12px; color:#888;">
+  Click cell to edit. Operators: SUMD SUMR MULD MULR IFGR PICKD SUM_TWICE_D F
+</div>
+<div id="log"></div>
+
+<script>
+const ROWS = 12;
+const COLS = 40;
+
+// Each cell: { value: string }
+// Operators can span multiple columns - we compute span from name length
+// span = ceil(name.length / 2), minimum 1
+let grid = [];
+let tickCount = 0;
+let running = false;
+let runInterval = null;
+let selectedCell = null; // {r, c}
+
+const OPERATORS = ['SUMD','SUMR','MULD','MULR','IFGR','PICKD','SUM_TWICE_D','F'];
+
+function cellSpan(v) {
+  // visual span in 2-char units, rounded up
+  let s = v.trim();
+  if (!isOperator(s)) return 1;
+  return Math.max(1, Math.ceil(s.length / 2));
+}
+
+function isOperator(v) {
+  return OPERATORS.includes(v.trim().toUpperCase());
+}
+
+function isNumber(v) {
+  let s = v.trim();
+  return s !== '' && !isNaN(Number(s));
+}
+
+function cellType(v) {
+  let s = v.trim();
+  if (s === '' || s === '.') return 'empty';
+  if (isNumber(s)) return 'number-cell';
+  if (isOperator(s)) return 'operator-cell';
+  return 'string-cell';
+}
+
+function initGrid() {
+  grid = [];
+  for (let r = 0; r < ROWS; r++) {
+    grid[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      grid[r][c] = { value: '' };
+    }
+  }
+}
+
+// Returns owner column for cell (r,c) - the leftmost col of the operator spanning over c
+// We scan left to find an operator whose span covers c
+function getOwner(r, c) {
+  for (let cc = 0; cc <= c; cc++) {
+    let v = grid[r][cc].value.trim();
+    if (v === '' || v === '.') continue;
+    let span = cellSpan(v);
+    if (cc + span - 1 >= c) return cc;
+  }
+  return c;
+}
+
+function readVal(r, c) {
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return null;
+  let owner = getOwner(r, c);
+  let v = grid[r][owner].value.trim();
+  if (v === '' || v === '.') return null;
+  if (isNumber(v)) return Number(v);
+  return v;
+}
+
+let pendingWrites = [];
+
+function scheduleWrite(r, c, val) {
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+  pendingWrites.push({ r, c, val: String(val) });
+}
+
+function flushWrites() {
+  for (let w of pendingWrites) {
+    grid[w.r][w.c].value = w.val;
+    log(`  write [${w.r},${w.c}] = ${w.val}`, 'log-write');
+  }
+  pendingWrites = [];
+}
+
+function log(msg, cls) {
+  let el = document.getElementById('log');
+  let line = document.createElement('div');
+  line.className = cls || '';
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+// Next non-empty cell strictly to the right of column c in row r
+// Returns column of owner cell
+function nextNonEmpty(r, startC) {
+  let c = startC;
+  while (c < COLS) {
+    let v = grid[r][c].value.trim();
+    if (v !== '' && v !== '.') return c;
+    c++;
+  }
+  return -1;
+}
+
+// Nth non-empty cell (1-indexed) strictly to the right of startC
+function nthNonEmpty(r, startC, n) {
+  let found = 0;
+  let c = startC;
+  while (c < COLS) {
+    let v = grid[r][c].value.trim();
+    if (v !== '' && v !== '.') {
+      found++;
+      if (found === n) return c;
+      // skip span
+      c += cellSpan(v);
+    } else {
+      c++;
+    }
+  }
+  return -1;
+}
+
+// Collect up to N non-empty values to the LEFT of column c (returns array, closest last)
+function readLeftN(r, c, n) {
+  let vals = [];
+  let cc = c - 1;
+  while (cc >= 0 && vals.length < n) {
+    let owner = getOwner(r, cc);
+    let v = grid[r][owner].value.trim();
+    if (v !== '' && v !== '.') {
+      vals.unshift(isNumber(v) ? Number(v) : v);
+      cc = owner - 1;
+    } else {
+      cc--;
+    }
+  }
+  return vals;
+}
+
+function tick() {
+  tickCount++;
+  document.getElementById('tick-display').textContent = 'tick: ' + tickCount;
+  log(`--- tick ${tickCount} ---`, 'log-tick');
+  pendingWrites = [];
+
+  for (let r = 0; r < ROWS; r++) {
+    let c = 0;
+    while (c < COLS) {
+      let v = grid[r][c].value.trim().toUpperCase();
+      let span = cellSpan(v);
+
+      if (!isOperator(v)) { c++; continue; }
+
+      // right write target = first col after this operator's span
+      let rightTarget = c + span;
+      let downTarget = r + 1;
+
+      let lefts = readLeftN(r, c, 2);
+      let A = lefts.length >= 2 ? lefts[0] : null;
+      let B = lefts.length >= 1 ? lefts[lefts.length - 1] : null;
+
+      switch (v) {
+        case 'SUMR':
+          if (A !== null && B !== null) scheduleWrite(r, rightTarget, Number(A) + Number(B));
+          break;
+        case 'SUMD':
+          if (A !== null && B !== null) scheduleWrite(downTarget, c, Number(A) + Number(B));
+          break;
+        case 'MULR':
+          if (A !== null && B !== null) scheduleWrite(r, rightTarget, Number(A) * Number(B));
+          break;
+        case 'MULD':
+          if (A !== null && B !== null) scheduleWrite(downTarget, c, Number(A) * Number(B));
+          break;
+        case 'SUM_TWICE_D':
+          // (A + B) * 2, writes down
+          if (A !== null && B !== null) scheduleWrite(downTarget, c, (Number(A) + Number(B)) * 2);
+          break;
+        case 'IFGR':
+          // A > B ? 1 : 0, writes right
+          if (A !== null && B !== null) scheduleWrite(r, rightTarget, Number(A) > Number(B) ? 1 : 0);
+          break;
+        case 'PICKD': {
+          // reads 1 left (index, 1-based), picks nth non-empty to the right, writes down
+          if (B !== null) {
+            let idx = Math.round(Number(B));
+            let tc = nthNonEmpty(r, rightTarget, idx);
+            if (tc >= 0) {
+              let picked = readVal(r, tc);
+              if (picked !== null) scheduleWrite(downTarget, c, picked);
+            }
+          }
+          break;
+        }
+        case 'F': {
+          // forward left value to next non-empty cell to the right
+          if (B !== null) {
+            let tc = nextNonEmpty(r, rightTarget);
+            if (tc >= 0) scheduleWrite(r, tc, B);
+          }
+          break;
+        }
+      }
+
+      c += span;
+    }
+  }
+
+  flushWrites();
+  renderGrid();
+}
+
+function toggleRun() {
+  running = !running;
+  if (running) runInterval = setInterval(tick, 500);
+  else clearInterval(runInterval);
+}
+
+function resetGrid() {
+  running = false;
+  clearInterval(runInterval);
+  tickCount = 0;
+  document.getElementById('tick-display').textContent = 'tick: 0';
+  document.getElementById('log').innerHTML = '';
+  initGrid();
+  renderGrid();
+}
+
+function loadExample() {
+  resetGrid();
+  // Row 0: 10 25 IFGR 1 PICKD slow fast
+  // IFGR: 10>25 = 0, so PICKD picks index 0... wait index is 1-based from IFGR result
+  // Let's make it: result of IFGR is 0 or 1, add 1 to get 1 or 2 for PICKD
+  // Simpler demo: hardcode index
+  // Row 0: 30 25 IFGR 1 PICKD slow fast  => 30>25=1, pick 1st = slow
+  grid[0][0].value = '30';
+  grid[0][1].value = '25';
+  grid[0][2].value = 'IFGR';
+  // IFGR span=2, rightTarget=4
+  grid[0][4].value = '1';
+  grid[0][5].value = 'PICKD';
+  // PICKD span=3, rightTarget=8
+  grid[0][8].value = 'slow';
+  grid[0][13].value = 'fast';
+
+  // Row 2: 3 4 SUMR then result MULR 2
+  grid[2][0].value = '3';
+  grid[2][1].value = '4';
+  grid[2][2].value = 'SUMR';
+  // SUMR span=2, rightTarget=4 -> writes 7 there
+  grid[2][5].value = '2';
+  grid[2][6].value = 'MULR';
+
+  // Row 4: SUM_TWICE_D demo
+  grid[4][0].value = '5';
+  grid[4][1].value = '3';
+  grid[4][2].value = 'SUM_TWICE_D';
+
+  renderGrid();
+}
+
+// Build a column->owner map for a row for rendering
+function buildOwnerMap(r) {
+  let map = new Array(COLS).fill(-1);
+  let c = 0;
+  while (c < COLS) {
+    let v = grid[r][c].value.trim();
+    if (v !== '' && v !== '.') {
+      let span = cellSpan(v);
+      for (let i = 0; i < span && c + i < COLS; i++) map[c + i] = c;
+      c += span;
+    } else {
+      map[c] = c;
+      c++;
+    }
+  }
+  return map;
+}
+
+function renderGrid() {
+  let container = document.getElementById('grid-container');
+  // Each logical col = 2 physical chars wide = 16px per char = 32px? 
+  // We said cell size = 2 characters. Let's use 14px per char, so 28px per col unit.
+  // But operators span multiple col units.
+  // We render as a table where each column = 14px wide (half of 2-char cell)
+  // Actually: 1 grid col = 2 chars wide visually. td width = 14px * 2 = 28px? 
+  // Let's just do: each td = one grid column = 28px wide.
+  // Operator spanning N cols gets colspan=N.
+
+  let html = '<table style="table-layout:fixed;">';
+  // col widths
+  html += '<colgroup>';
+  for (let c = 0; c < COLS; c++) html += '<col style="width:28px;">';
+  html += '</colgroup>';
+
+  for (let r = 0; r < ROWS; r++) {
+    let ownerMap = buildOwnerMap(r);
+    html += '<tr>';
+    let c = 0;
+    while (c < COLS) {
+      let owner = ownerMap[c];
+      if (owner !== c) { c++; continue; } // skip, already rendered as part of colspan
+
+      let v = grid[r][c].value.trim();
+      let span = (v !== '' && v !== '.') ? cellSpan(v) : 1;
+      // clamp span
+      span = Math.min(span, COLS - c);
+
+      let type = cellType(v);
+      let isSel = selectedCell && selectedCell.r === r && selectedCell.c === c;
+      let selClass = isSel ? ' selected' : '';
+
+      html += `<td class="${type}${selClass}" colspan="${span}" data-r="${r}" data-c="${c}" onclick="selectCell(${r},${c})" style="width:${span*28}px;">`;
+      if (isSel) {
+        html += `<input id="cell-input" value="${grid[r][c].value}" onblur="commitCell(${r},${c},this.value)" onkeydown="cellKey(event,${r},${c})" style="min-width:${Math.max(80,span*28)}px;" />`;
+      } else {
+        html += `<span class="cell-label">${v === '' ? '' : v}</span>`;
+      }
+      html += '</td>';
+      c += span;
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  container.innerHTML = html;
+
+  if (selectedCell) {
+    let inp = document.getElementById('cell-input');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+}
+
+function selectCell(r, c) {
+  // find owner
+  let ownerMap = buildOwnerMap(r);
+  let owner = ownerMap[c] >= 0 ? ownerMap[c] : c;
+  selectedCell = { r, c: owner };
+  renderGrid();
+}
+
+function commitCell(r, c, val) {
+  grid[r][c].value = val;
+  selectedCell = null;
+  renderGrid();
+}
+
+function cellKey(e, r, c) {
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    commitCell(r, c, e.target.value);
+    let span = cellSpan(grid[r][c].value.trim());
+    let nr = r, nc = c;
+    if (e.key === 'Tab') nc = Math.min(c + span, COLS - 1);
+    else nr = Math.min(r + 1, ROWS - 1);
+    selectedCell = { r: nr, c: nc };
+    renderGrid();
+  } else if (e.key === 'Escape') {
+    selectedCell = null;
+    renderGrid();
+  }
+}
+
+initGrid();
+renderGrid();
+</script>
+</body>
+</html>
