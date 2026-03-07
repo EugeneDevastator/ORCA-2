@@ -61,15 +61,15 @@
   <div id="table-wrap"></div>
 </div>
 <div style="margin-bottom:6px; font-size:12px; color:#888;">
-  Click cell to edit. Operators: SUMD SUMR MULD MULR IFGR PICKD SUM_TWICE_D F
+  Operators: SUMD SUMR MULD MULR IFGR PICKD SUM_TWICE_D F MAXR MINR SUMALLR
 </div>
 <div id="log"></div>
 
 <script>
 const ROWS = 12;
 const COLS = 40;
-const COL_W = 29; // td width + 1px border
-const ROW_H = 21; // td height + 1px border
+const COL_W = 29;
+const ROW_H = 21;
 
 let grid = [];
 let tickCount = 0;
@@ -79,7 +79,7 @@ let selectedCell = null;
 let lastScans = [];
 let lastWrites = [];
 
-const OPERATORS = ['SUMD','SUMR','MULD','MULR','IFGR','PICKD','SUM_TWICE_D','F'];
+const OPERATORS = ['SUMD','SUMR','MULD','MULR','IFGR','PICKD','SUM_TWICE_D','F','MAXR','MINR','SUMALLR'];
 
 const OP_FILL = {
   'SUMR':        'rgba(100,180,255,0.13)',
@@ -90,6 +90,9 @@ const OP_FILL = {
   'IFGR':        'rgba(255,100,180,0.13)',
   'PICKD':       'rgba(200,200,80,0.13)',
   'F':           'rgba(180,100,255,0.13)',
+  'MAXR':        'rgba(255,80,80,0.13)',
+  'MINR':        'rgba(80,255,220,0.13)',
+  'SUMALLR':     'rgba(180,255,80,0.13)',
 };
 const OP_STROKE = {
   'SUMR':        'rgba(100,180,255,0.8)',
@@ -100,6 +103,9 @@ const OP_STROKE = {
   'IFGR':        'rgba(255,100,180,0.8)',
   'PICKD':       'rgba(200,200,80,0.8)',
   'F':           'rgba(180,100,255,0.8)',
+  'MAXR':        'rgba(255,80,80,0.8)',
+  'MINR':        'rgba(80,255,220,0.8)',
+  'SUMALLR':     'rgba(180,255,80,0.8)',
 };
 
 function isOperator(v) { return OPERATORS.includes(v.trim().toUpperCase()); }
@@ -125,7 +131,6 @@ function initGrid() {
   }
 }
 
-// Returns for each col: the owner col (start of the logical cell occupying that col)
 function buildOwnerMap(r) {
   let map = new Array(COLS).fill(-1);
   let c = 0;
@@ -160,10 +165,9 @@ function readVal(r, c) {
   return v;
 }
 
-// Scan left from col c-1, collect up to n non-empty values. Returns [A, B] oldest first.
+// Read exactly N values from left, oldest first. Returns {vals, cols}
 function readLeftN(r, c, n) {
-  let vals = [];
-  let cols = [];
+  let vals = [], cols = [];
   let cc = c - 1;
   while (cc >= 0 && vals.length < n) {
     let owner = getOwnerCol(r, cc);
@@ -177,7 +181,28 @@ function readLeftN(r, c, n) {
   return { vals, cols };
 }
 
-// Scan right from startC, return col of first non-empty (0 breaks scan = -1)
+// Read contiguous number run immediately left of col c.
+// Stops (resets) when a non-number non-empty cell is encountered.
+// Returns {nums, cols} where cols[0] is leftmost cell col.
+function readContiguousNumbersLeft(r, c) {
+  let nums = [], cols = [];
+  let cc = c - 1;
+  while (cc >= 0) {
+    let owner = getOwnerCol(r, cc);
+    let v = grid[r][owner].value.trim();
+    if (v === '' || v === '.') { cc = owner - 1; continue; }
+    if (isNumber(v)) {
+      nums.unshift(Number(v));
+      cols.unshift(owner);
+      cc = owner - 1;
+    } else {
+      // non-number cell: barrier, stop
+      break;
+    }
+  }
+  return { nums, cols };
+}
+
 function nextNonEmptyRight(r, startC) {
   for (let c = startC; c < COLS; c++) {
     let v = grid[r][c].value.trim();
@@ -187,10 +212,8 @@ function nextNonEmptyRight(r, startC) {
   return -1;
 }
 
-// Return col of nth non-empty to the right of startC (1-indexed), 0 breaks
 function nthNonEmptyRight(r, startC, n) {
-  let found = 0;
-  let c = startC;
+  let found = 0, c = startC;
   while (c < COLS) {
     let v = grid[r][c].value.trim();
     if (v === '0') return -1;
@@ -203,9 +226,8 @@ function nthNonEmptyRight(r, startC, n) {
   return -1;
 }
 
-// Find the last col of a cell starting at ownerC
 function cellEndCol(r, ownerC) {
-  let v = grid[r][ownerC].value.trim();
+  let v = grid[r][ownerC] ? grid[r][ownerC].value.trim() : '';
   return ownerC + cellSpan(v) - 1;
 }
 
@@ -226,16 +248,15 @@ function flushWrites() {
 
 function log(msg, cls) {
   let el = document.getElementById('log');
-  let line = document.createElement('div');
-  line.className = cls || '';
-  line.textContent = msg;
-  el.appendChild(line);
+  let d = document.createElement('div');
+  d.className = cls || '';
+  d.textContent = msg;
+  el.appendChild(d);
   el.scrollTop = el.scrollHeight;
 }
 
-// Record a scan: fromC and toC are logical cell owner cols
-// We'll draw from start of fromC cell to end of toC cell
 function recordScan(r, fromOwnerC, toOwnerC, op) {
+  if (toOwnerC < fromOwnerC) toOwnerC = fromOwnerC;
   lastScans.push({ r, fromOwnerC, toOwnerC, op });
 }
 
@@ -254,45 +275,41 @@ function tick() {
       let span = cellSpan(raw);
       if (!isOperator(raw)) { c++; continue; }
 
-      let opEndC = c + span - 1;
+      let opEndC   = c + span - 1;
       let rightStart = c + span;
 
       switch (v) {
         case 'SUMR': case 'SUMD': {
           let { vals, cols } = readLeftN(r, c, 2);
           let fromC = cols.length > 0 ? cols[0] : c;
-          let toC = opEndC;
-          recordScan(r, fromC, toC, v);
+          recordScan(r, fromC, opEndC, v);
           if (vals.length >= 2) {
             let res = Number(vals[0]) + Number(vals[1]);
             if (v === 'SUMR') scheduleWrite(r, rightStart, res);
-            else scheduleWrite(r + 1, c, res);
+            else              scheduleWrite(r + 1, c, res);
           }
           break;
         }
         case 'MULR': case 'MULD': {
           let { vals, cols } = readLeftN(r, c, 2);
           let fromC = cols.length > 0 ? cols[0] : c;
-          let toC = opEndC;
-          recordScan(r, fromC, toC, v);
+          recordScan(r, fromC, opEndC, v);
           if (vals.length >= 2) {
             let res = Number(vals[0]) * Number(vals[1]);
             if (v === 'MULR') scheduleWrite(r, rightStart, res);
-            else scheduleWrite(r + 1, c, res);
+            else              scheduleWrite(r + 1, c, res);
           }
           break;
         }
         case 'SUM_TWICE_D': {
-          // reads 1 left, 1 right
           let { vals: lv, cols: lc } = readLeftN(r, c, 1);
           let rc = nextNonEmptyRight(r, rightStart);
           let fromC = lc.length > 0 ? lc[0] : c;
-          let toC = rc >= 0 ? cellEndCol(r, rc) : opEndC;
+          let toC   = rc >= 0 ? cellEndCol(r, rc) : opEndC;
           recordScan(r, fromC, toC, v);
           if (lv.length >= 1 && rc >= 0) {
             let B = readVal(r, rc);
-            let res = (Number(lv[0]) + Number(B)) * 2;
-            scheduleWrite(r + 1, c, res);
+            scheduleWrite(r + 1, c, (Number(lv[0]) + Number(B)) * 2);
           }
           break;
         }
@@ -300,18 +317,17 @@ function tick() {
           let { vals, cols } = readLeftN(r, c, 2);
           let fromC = cols.length > 0 ? cols[0] : c;
           recordScan(r, fromC, opEndC, v);
-          if (vals.length >= 2) {
+          if (vals.length >= 2)
             scheduleWrite(r, rightStart, Number(vals[0]) > Number(vals[1]) ? 1 : 0);
-          }
           break;
         }
         case 'PICKD': {
           let { vals, cols } = readLeftN(r, c, 1);
           if (vals.length >= 1) {
             let idx = Math.round(Number(vals[0]));
-            let tc = nthNonEmptyRight(r, rightStart, idx);
+            let tc  = nthNonEmptyRight(r, rightStart, idx);
             let fromC = cols[0];
-            let toC = tc >= 0 ? cellEndCol(r, tc) : opEndC;
+            let toC   = tc >= 0 ? cellEndCol(r, tc) : opEndC;
             recordScan(r, fromC, toC, v);
             if (tc >= 0) {
               let picked = readVal(r, tc);
@@ -324,10 +340,23 @@ function tick() {
           let { vals, cols } = readLeftN(r, c, 1);
           let tc = nextNonEmptyRight(r, rightStart);
           let fromC = cols.length > 0 ? cols[0] : c;
-          let toC = tc >= 0 ? cellEndCol(r, tc) : opEndC;
+          let toC   = tc >= 0 ? cellEndCol(r, tc) : opEndC;
           recordScan(r, fromC, toC, v);
-          if (vals.length >= 1 && tc >= 0) {
+          if (vals.length >= 1 && tc >= 0)
             scheduleWrite(r, tc, vals[0]);
+          break;
+        }
+        case 'MAXR': case 'MINR': case 'SUMALLR': {
+          // contiguous number run left, barrier on string
+          let { nums, cols } = readContiguousNumbersLeft(r, c);
+          let fromC = cols.length > 0 ? cols[0] : c;
+          recordScan(r, fromC, opEndC, v);
+          if (nums.length > 0) {
+            let res;
+            if (v === 'MAXR')    res = Math.max(...nums);
+            else if (v === 'MINR') res = Math.min(...nums);
+            else                   res = nums.reduce((a, b) => a + b, 0);
+            scheduleWrite(r, rightStart, res);
           }
           break;
         }
@@ -357,27 +386,48 @@ function resetGrid() {
 
 function loadExample() {
   resetGrid();
-  // Row 0: 30 25 IFGR -> 1 or 0, then PICKD picks nth of [slow, fast]
-  grid[0][0].value = '30';
-  grid[0][1].value = '25';
-  grid[0][2].value = 'IFGR';
-  grid[0][4].value = '1';
-  grid[0][5].value = 'PICKD';
-  grid[0][8].value = 'slow';
-  grid[0][13].value = 'fast';
+  // Row 0: barrier demo - 1 2 3 barrier 4 5 6 MAXR -> should get 6 (max of 4,5,6)
+  grid[0][0].value = '1';
+  grid[0][1].value = '2';
+  grid[0][2].value = '3';
+  grid[0][3].value = 'barrier';
+  grid[0][4].value = '4';
+  grid[0][5].value = '5';
+  grid[0][6].value = '6';
+  grid[0][7].value = 'MAXR';
 
-  // Row 2: 3 4 SUMR -> writes 7 to col 4, then F skips gap to MULR, MULR reads 7 and 2
-  grid[2][0].value = '3';
-  grid[2][1].value = '4';
-  grid[2][2].value = 'SUMR';
-  // result lands at col 4
-  grid[2][8].value = '2';
-  grid[2][9].value = 'MULR';
+  // Row 2: MINR - same setup, gets min of 4,5,6 = 4
+  grid[2][0].value = '1';
+  grid[2][1].value = '2';
+  grid[2][2].value = '3';
+  grid[2][3].value = 'sep';
+  grid[2][4].value = '4';
+  grid[2][5].value = '5';
+  grid[2][6].value = '6';
+  grid[2][7].value = 'MINR';
 
-  // Row 4: SUM_TWICE_D reads left and right
-  grid[4][0].value = '5';
-  grid[4][1].value = 'SUM_TWICE_D';
-  grid[4][5].value = '3';
+  // Row 4: SUMALLR - no barrier, gets sum of all: 10+20+30 = 60
+  grid[4][0].value = '10';
+  grid[4][1].value = '20';
+  grid[4][2].value = '30';
+  grid[4][3].value = 'SUMALLR';
+
+  // Row 6: IFGR feeding PICKD with MAXR result
+  grid[6][0].value = '1';
+  grid[6][1].value = '2';
+  grid[6][2].value = '3';
+  grid[6][3].value = 'wall';
+  grid[6][4].value = '9';
+  grid[6][5].value = '7';
+  grid[6][6].value = '5';
+  grid[6][7].value = 'MAXR';   // -> 9
+  // result lands at col 9
+  grid[6][10].value = '5';
+  grid[6][11].value = 'IFGR';  // 9 > 5 -> 1
+  // result at col 13
+  grid[6][14].value = 'PICKD';
+  grid[6][17].value = 'low';
+  grid[6][21].value = 'high';
 
   renderGrid();
 }
@@ -394,7 +444,7 @@ function renderGrid() {
     let c = 0;
     while (c < COLS) {
       if (ownerMap[c] !== c) { c++; continue; }
-      let v = grid[r][c].value.trim();
+      let v    = grid[r][c].value.trim();
       let span = (v !== '' && v !== '.') ? Math.min(cellSpan(v), COLS - c) : 1;
       let type = cellType(v);
       let isSel = selectedCell && selectedCell.r === r && selectedCell.c === c;
@@ -421,57 +471,52 @@ function renderGrid() {
 }
 
 function drawOverlay() {
-  let canvas = document.getElementById('overlay');
-  let show = document.getElementById('show-overlay').checked;
+  let canvas  = document.getElementById('overlay');
+  let show    = document.getElementById('show-overlay').checked;
   let tableEl = document.querySelector('#table-wrap table');
-  if (!tableEl) { return; }
+  if (!tableEl) return;
 
-  let tw = tableEl.offsetWidth || COLS * COL_W;
+  let tw = tableEl.offsetWidth  || COLS * COL_W;
   let th = tableEl.offsetHeight || ROWS * ROW_H;
-  canvas.width = tw;
-  canvas.height = th;
-  canvas.style.width = tw + 'px';
-  canvas.style.height = th + 'px';
+  canvas.width  = tw; canvas.height = th;
+  canvas.style.width = tw + 'px'; canvas.style.height = th + 'px';
 
   let ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, tw, th);
   if (!show) return;
 
-  // group scans by row, stack them vertically inside the row
   let byRow = {};
   for (let s of lastScans) {
     if (!byRow[s.r]) byRow[s.r] = [];
     byRow[s.r].push(s);
   }
 
-  const BAND = 5;
-  const PAD  = 1;
+  const BAND = 5, PAD = 1;
 
   for (let rk in byRow) {
+    let ri = Number(rk);
     let scans = byRow[rk];
-    let rowY = Number(rk) * ROW_H;
+    let rowY  = ri * ROW_H;
     for (let i = 0; i < scans.length; i++) {
-      let s = scans[i];
-      // pixel x: start of fromOwnerC cell, end of toOwnerC cell (include full cell width)
+      let s  = scans[i];
+      let v2 = grid[ri][s.toOwnerC] ? grid[ri][s.toOwnerC].value.trim() : '';
       let x1 = s.fromOwnerC * COL_W;
-      let x2 = (s.toOwnerC + cellSpan(grid[Number(rk)][s.toOwnerC].value.trim())) * COL_W;
+      let x2 = (s.toOwnerC + cellSpan(v2)) * COL_W;
       let y  = rowY + PAD + i * (BAND + 2);
       let w  = x2 - x1;
       let h  = BAND;
 
-      ctx.fillStyle = OP_FILL[s.op] || 'rgba(200,200,200,0.1)';
+      ctx.fillStyle   = OP_FILL[s.op]   || 'rgba(200,200,200,0.1)';
       ctx.fillRect(x1, y, w, h);
       ctx.strokeStyle = OP_STROKE[s.op] || 'rgba(200,200,200,0.6)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth   = 1;
       ctx.strokeRect(x1 + 0.5, y + 0.5, w - 1, h - 1);
-
-      ctx.fillStyle = OP_STROKE[s.op] || '#aaa';
-      ctx.font = '7px monospace';
+      ctx.fillStyle   = OP_STROKE[s.op] || '#aaa';
+      ctx.font        = '7px monospace';
       ctx.fillText(s.op, x1 + 2, y + h - 1);
     }
   }
 
-  // write dots
   for (let w of lastWrites) {
     let x = w.c * COL_W + COL_W / 2;
     let y = w.r * ROW_H + ROW_H / 2;
@@ -483,8 +528,7 @@ function drawOverlay() {
 }
 
 function selectCell(r, c) {
-  let owner = getOwnerCol(r, c);
-  selectedCell = { r, c: owner };
+  selectedCell = { r, c: getOwnerCol(r, c) };
   renderGrid();
 }
 function commitCell(r, c, val) {
@@ -497,7 +541,7 @@ function cellKey(e, r, c) {
     let span = cellSpan(grid[r][c].value.trim());
     let nr = r, nc = c;
     if (e.key === 'Tab') nc = Math.min(c + span, COLS - 1);
-    else nr = Math.min(r + 1, ROWS - 1);
+    else                 nr = Math.min(r + 1, ROWS - 1);
     selectedCell = { r: nr, c: nc };
     renderGrid();
   } else if (e.key === 'Escape') { selectedCell = null; renderGrid(); }
