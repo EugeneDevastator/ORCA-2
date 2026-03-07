@@ -10,21 +10,33 @@
   td {
     border: 1px solid #333; padding: 6;
     width: 20px; height: 20px; min-width: 20px; max-width: 20px;
-    position: relative; overflow: hidden;
+    position: relative; overflow: visible;
     box-sizing: border-box; cursor: default;
-	text-align: right;
   }
   td.empty         { background: #111; }
-  td.number-cell   { background: #1a1a2e; }
+  td.number-cell   { background: #111; }
   td.operator-cell { background: #2a1a1a; }
-  td.string-cell   { background: #1a2a2a; }
+  td.string-cell   { background: #111; }
   td.selected { outline: 2px solid #aaa; z-index: 10; }
+  td.overflow-ghost {
+    background: #111 !important;
+    border-left-color: transparent !important;
+    border-right-color: transparent !important;
+  }
+  td.has-overflow {
+    border-right-color: transparent !important;
+  }
   td span.cell-label {
-    display: block; white-space: nowrap; overflow: hidden;
+    display: block; white-space: nowrap;
     font-size: 12px; line-height: 20px;
     padding: 0 3px; pointer-events: none;
+    position: relative; z-index: 2;
+    overflow: hidden;
   }
-  td.empty span.cell-label    { color: #333; }
+  td span.cell-label.overflow-label {
+    overflow: visible;
+  }
+  td.empty span.cell-label    { color: #111; }
   td.number-cell span.cell-label   { color: #6af; }
   td.operator-cell span.cell-label { color: #fa6; }
   td.string-cell span.cell-label   { color: #a6f; }
@@ -190,7 +202,6 @@ function readContiguousNumbersLeft(r, c) {
   return { nums, cols };
 }
 
-// Returns col of next non-empty cell at or after startC, -1 if none
 function nextNonEmptyRight(r, startC) {
   for (let c = startC; c < COLS; c++) {
     let v = readCellRaw(r, c).trim();
@@ -199,7 +210,6 @@ function nextNonEmptyRight(r, startC) {
   return -1;
 }
 
-// 1-based: index 1 = first non-empty to right of startC
 function nthNonEmptyRight(r, startC, n) {
   let found = 0, c = startC;
   while (c < COLS) {
@@ -407,6 +417,35 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+const CHAR_W = 7;
+const CELL_PAD = 6;
+
+function countEmptyRight(r, c) {
+  let count = 0;
+  for (let cc = c + 1; cc < COLS; cc++) {
+    let v = grid[r][cc].value.trim();
+    if (v === '' || v === '.') count++;
+    else break;
+  }
+  return count;
+}
+
+// Returns per-col ghost info: ghost[c] = ownerCol if ghosted, else -1
+function buildGhostSet(r) {
+  let ghost = new Int16Array(COLS).fill(-1);
+  for (let c = 0; c < COLS; c++) {
+    let v = grid[r][c].value.trim();
+    if (v === '' || v === '.' || isOperator(v)) continue;
+    let textPx = v.length * CHAR_W + CELL_PAD;
+    if (textPx <= CELL_W) continue;
+    let emptyAfter = countEmptyRight(r, c);
+    if (emptyAfter === 0) continue;
+    let spillCols = Math.min(Math.ceil((textPx - CELL_W) / CELL_W), emptyAfter);
+    for (let i = 1; i < spillCols; i++) ghost[c + i] = c;
+  }
+  return ghost;
+}
+
 function renderGrid() {
   let wrap = document.getElementById('table-wrap');
   let html = '<table><colgroup>';
@@ -414,7 +453,8 @@ function renderGrid() {
   html += '</colgroup>';
 
   for (let r = 0; r < ROWS; r++) {
-    let om = buildOwnerMap(r);
+    let om    = buildOwnerMap(r);
+    let ghost = buildGhostSet(r);
     html += '<tr>';
     let c = 0;
     while (c < COLS) {
@@ -424,14 +464,34 @@ function renderGrid() {
       let type = cellType(v);
       let isSel = (r === selR && c === selC);
 
-      html += `<td class="${type}${isSel ? ' selected' : ''}" colspan="${span}" `
-            + `onclick="clickCell(${r},${c})">`;
-      if (isSel && editing) {
-        html += `<input id="cell-input" value="${escHtml(grid[r][c].value)}" `
-              + `onkeydown="inputKey(event)" />`;
-      } else {
-        html += `<span class="cell-label">${escHtml(v)}</span>`;
+      let isGhost = (ghost[c] !== -1);
+
+      // Check if this literal cell has overflow spill into ghost cols to its right
+      // If so, mark it so we can hide its right border (border-collapse shares it with ghost's left)
+      let hasOverflow = false;
+      if (!isGhost && v !== '' && v !== '.' && !isOperator(v)) {
+        let textPx = v.length * CHAR_W + CELL_PAD;
+        if (textPx > CELL_W && countEmptyRight(r, c) > 0) {
+          hasOverflow = true;
+        }
       }
+
+      let tdClass = isGhost ? 'empty overflow-ghost' : type;
+      if (isSel) tdClass += ' selected';
+      if (hasOverflow) tdClass += ' has-overflow';
+
+      html += `<td class="${tdClass}" colspan="${span}" onclick="clickCell(${r},${c})">`;
+
+      if (!isGhost) {
+        if (isSel && editing) {
+          html += `<input id="cell-input" value="${escHtml(grid[r][c].value)}" `
+                + `onkeydown="inputKey(event)" />`;
+        } else {
+          let spanClass = 'cell-label' + (hasOverflow ? ' overflow-label' : '');
+          html += `<span class="${spanClass}">${escHtml(v)}</span>`;
+        }
+      }
+
       html += '</td>';
       c += span;
     }
