@@ -175,7 +175,7 @@ INC b
 b : 14 >> a 
 a : 14
 a: 14 // shorthand for value read.
-:a    // doesnt execute on its own, unless holds operator.
+:a    // doesnt execute
 LISTR :a b
 []: 14 b
 
