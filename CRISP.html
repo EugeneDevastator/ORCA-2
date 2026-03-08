@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>CRISP</title>
+<style>
+  body { margin: 0; background: #1a1a1a; color: #e0e0e0; font-family: monospace; display: flex; height: 100vh; overflow: hidden; }
+  #left { width: 50%; display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; gap: 6px; }
+  #right { width: 50%; display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; gap: 6px; }
+  textarea { background: #111; color: #e0e0e0; border: 1px solid #333; padding: 8px; font-family: monospace; font-size: 13px; resize: none; }
+  canvas { flex: 1; background: #111; border: 1px solid #333; min-height: 0; }
+  button { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 5px 14px; cursor: pointer; font-family: monospace; font-size: 12px; }
+  button:hover { background: #444; }
+  h3 { margin: 0; font-size: 11px; color: #555; letter-spacing: 1px; }
+  #exec-table { background: #0a0a0a; border: 1px solid #333; overflow-y: auto; height: 200px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td { padding: 2px 8px; vertical-align: top; border-bottom: 1px solid #1a1a1a; }
+  td:first-child { color: #ccc; width: 55%; word-break: break-all; }
+  td:last-child  { color: #4a9; width: 45%; word-break: break-all; }
+  .row-comment td { color: #444 !important; }
+  .row-init td:first-child { color: #8c8; }
+  .row-frame td:first-child { color: #8af; }
+  .row-skipped td:first-child { color: #633 !important; }
+  .section-header td { color: #555 !important; background: #0f0f0f; }
+</style>
+</head>
+<body>
+
+<div id="left">
+  <h3>PROGRAM</h3>
+  <textarea id="editor" style="flex:1;min-height:0" spellcheck="false">INIT
+SET x 100
+SET y 200
+SET r 18
+SET speed 2
+SET dir 1
+
+FRAME
+// move: x = x + speed * dir
+speed dir MUL _ SETTO step
+x step ADD _ SETTO x
+
+// bounce right
+x 540 GT IF -1 SETTO dir
+
+// bounce left
+x 20 LT IF 1 SETTO dir
+
+// bob y: y = sin(x * 0.04) * 40 + 200
+x 0.04 MUL SIN 40 MUL 200 ADD _ SETTO y</textarea>
+  <div style="display:flex;gap:6px;align-items:center">
+    <button onclick="runOnce()">STEP</button>
+    <button id="btnloop" onclick="toggleLoop()">LOOP</button>
+    <button onclick="resetSim()">RESET</button>
+    <span id="fps" style="font-size:11px;color:#555;margin-left:8px"></span>
+  </div>
+  <h3>EXECUTION &nbsp; resolved line | stack</h3>
+  <div id="exec-table"><table id="etable"><tbody></tbody></table></div>
+</div>
+
+<div id="right">
+  <h3>SIMULATION</h3>
+  <canvas id="canvas"></canvas>
+  <h3>VARS</h3>
+  <div id="varlist" style="background:#0a0a0a;border:1px solid #333;padding:6px;font-size:12px;color:#888;height:60px;overflow-y:auto"></div>
+</div>
+
+<script>
+var vars = {};
+var looping = false;
+var loopHandle = null;
+var lastFrameTime = 0;
+var execRows = [];
+
+var canvas = document.getElementById('canvas');
+function resizeCanvas() { canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight; }
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+function drawSim() {
+  var ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (var gx = 20; gx < canvas.width; gx += 40)
+    for (var gy = 20; gy < canvas.height; gy += 40) {
+      ctx.fillStyle = '#1e1e1e'; ctx.fillRect(gx, gy, 2, 2);
+    }
+  var cx = vars['x'] !== undefined ? Number(vars['x']) : canvas.width/2;
+  var cy = vars['y'] !== undefined ? Number(vars['y']) : canvas.height/2;
+  var r  = vars['r'] !== undefined ? Number(vars['r']) : 20;
+  ctx.beginPath(); ctx.arc(cx+3, cy+3, r, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
+  ctx.fillStyle = '#3af'; ctx.fill();
+  ctx.strokeStyle = '#6cf'; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function updateVarList() {
+  var keys = Object.keys(vars);
+  document.getElementById('varlist').textContent = keys.map(function(k) {
+    var v = vars[k];
+    return k + '=' + (Array.isArray(v) ? '['+v.map(fmt).join(',')+']' : fmt(v));
+  }).join('   ');
+}
+
+function isNum(s) { return s !== '' && s !== null && !isNaN(Number(s)); }
+
+function fmt(v) {
+  if (v === null || v === undefined) return 'null';
+  if (Array.isArray(v)) return '['+v.map(fmt).join(',')+']';
+  if (typeof v === 'number') {
+    var s = +v.toFixed(4) + '';
+    return s;
+  }
+  return String(v);
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// resolve a single token to a value (no side effects)
+function resolveToken(tok) {
+  if (isNum(tok)) return Number(tok);
+  if (vars[tok] !== undefined) return vars[tok];
+  return tok; // string literal
+}
+
+function execLine(rawLine) {
+  var ci = rawLine.indexOf('//');
+  var line = ci >= 0 ? rawLine.substring(0, ci) : rawLine;
+  line = line.trim();
+  if (!line) return null;
+
+  var tokens = line.split(/\s+/);
+  var stack = [];
+  var resolved = []; // display tokens
+  var skipped = false;
+
+  function pop() {
+    return stack.length ? stack.pop() : 0;
+  }
+  function push(v) {
+    stack.push(v);
+  }
+  function top() {
+    return stack.length ? stack[stack.length-1] : 0;
+  }
+
+  var i = 0;
+  while (i < tokens.length) {
+    if (skipped) { resolved.push('<span style="color:#633">'+esc(tokens[i])+'</span>'); i++; continue; }
+
+    var tok = tokens[i];
+
+    // prefix commands
+    if (tok === 'SET') {
+      var name = tokens[i+1];
+      var valTok = tokens[i+2];
+      var val = resolveToken(valTok);
+      vars[name] = val;
+      resolved.push('SET', name, fmt(val));
+      push(val);
+      i += 3; continue;
+    }
+    if (tok === 'SETTO') {
+      var name = tokens[i+1];
+      var val = pop();
+      vars[name] = val;
+      resolved.push('SETTO→'+name+'='+fmt(val));
+      i += 2; continue;
+    }
+    if (tok === 'IF') {
+      var cond = pop();
+      resolved.push('IF('+fmt(cond)+')');
+      if (!Number(cond)) skipped = true;
+      i += 1; continue;
+    }
+    if (tok === 'PRINT') {
+      var val = pop();
+      console.log(String(val));
+      resolved.push('PRINT('+fmt(val)+')');
+      i += 1; continue;
+    }
+    if (tok === 'AT') {
+      var idx = pop();
+      var arr = pop();
+      if (!Array.isArray(arr)) arr = [arr];
+      var val = arr[Number(idx)];
+      push(val);
+      resolved.push('AT['+fmt(idx)+']='+fmt(val));
+      i += 1; continue;
+    }
+    if (tok === 'LEN') {
+      var arr = pop();
+      var val = Array.isArray(arr) ? arr.length : 1;
+      push(val);
+      resolved.push('LEN='+val);
+      i += 1; continue;
+    }
+    if (tok === 'SUMR') {
+      var arr = pop();
+      if (!Array.isArray(arr)) arr = [arr];
+      var s = 0; for (var ri=0;ri<arr.length;ri++) s+=Number(arr[ri]);
+      push(s);
+      resolved.push('SUMR='+fmt(s));
+      i += 1; continue;
+    }
+    if (tok === 'REPEAT') {
+      var n = pop();
+      var val = pop();
+      var arr = [];
+      for (var ri=0;ri<Number(n);ri++) arr.push(val);
+      push(arr);
+      resolved.push('REPEAT('+n+')='+fmt(arr));
+      i += 1; continue;
+    }
+
+    // binary ops — pop two, push one
+    var binOps = { ADD:1, SUB:1, MUL:1, DIV:1, MOD:1, GT:1, LT:1, EQ:1, AND:1, OR:1 };
+    if (binOps[tok]) {
+      var b = pop();
+      var a = pop();
+      var res;
+      if      (tok==='ADD') res = Number(a)+Number(b);
+      else if (tok==='SUB') res = Number(a)-Number(b);
+      else if (tok==='MUL') res = Number(a)*Number(b);
+      else if (tok==='DIV') res = Number(b)!==0 ? Number(a)/Number(b) : 0;
+      else if (tok==='MOD') res = Number(a)%Number(b);
+      else if (tok==='GT')  res = Number(a)>Number(b)?1:0;
+      else if (tok==='LT')  res = Number(a)<Number(b)?1:0;
+      else if (tok==='EQ')  res = (String(a)===String(b))?1:0;
+      else if (tok==='AND') res = (a&&b)?1:0;
+      else if (tok==='OR')  res = (a||b)?1:0;
+      push(res);
+      resolved.push(tok+'('+fmt(a)+','+fmt(b)+')='+fmt(res));
+      i += 1; continue;
+    }
+
+    // unary ops
+    var unOps = { NEG:1, ABS:1, SIN:1, COS:1, FLOOR:1, CEIL:1, SQRT:1, NOT:1 };
+    if (unOps[tok]) {
+      var a = pop();
+      var res;
+      if      (tok==='NEG')   res = -Number(a);
+      else if (tok==='ABS')   res = Math.abs(Number(a));
+      else if (tok==='SIN')   res = Math.sin(Number(a));
+      else if (tok==='COS')   res = Math.cos(Number(a));
+      else if (tok==='FLOOR') res = Math.floor(Number(a));
+      else if (tok==='CEIL')  res = Math.ceil(Number(a));
+      else if (tok==='SQRT')  res = Math.sqrt(Number(a));
+      else if (tok==='NOT')   res = a ? 0 : 1;
+      push(res);
+      resolved.push(tok+'('+fmt(a)+')='+fmt(res));
+      i += 1; continue;
+    }
+
+    // _ = dup top
+    if (tok === '_') {
+      var v = top();
+      push(v);
+      resolved.push('_('+fmt(v)+')');
+      i += 1; continue;
+    }
+
+    // STACK keyword
+    if (tok === 'STACK') {
+      push(stack.slice());
+      resolved.push('STACK');
+      i += 1; continue;
+    }
+
+    // plain value or variable
+    var rv = resolveToken(tok);
+    var display = (rv !== tok) ? tok+'→'+fmt(rv) : fmt(rv);
+    push(rv);
+    resolved.push(display);
+    i += 1;
+  }
+
+  return { resolved: resolved, stack: stack.slice(), skipped: skipped };
+}
+
+function parseSections(src) {
+  var lines = src.split('\n');
+  var init = [], frame = [];
+  var section = null;
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].trim();
+    if (t === 'INIT')  { section = 'init';  continue; }
+    if (t === 'FRAME') { section = 'frame'; continue; }
+    if (section === 'init')  init.push(lines[i]);
+    else if (section === 'frame') frame.push(lines[i]);
+  }
+  return { init: init, frame: frame };
+}
+
+var initDone = false;
+var sections = { init: [], frame: [] };
+
+function runSection(lines, type) {
+  for (var i = 0; i < lines.length; i++) {
+    var raw = lines[i];
+    var trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('//')) {
+      execRows.push({ type: 'comment', text: trimmed }); continue;
+    }
+    var r = execLine(raw);
+    if (!r) continue;
+    execRows.push({ type: type, resolved: r.resolved, stack: r.stack, skipped: r.skipped, raw: trimmed });
+  }
+}
+
+function runInit() {
+  sections = parseSections(document.getElementById('editor').value);
+  execRows = [];
+  execRows.push({ type: 'header', label: 'INIT' });
+  runSection(sections.init, 'init');
+  initDone = true;
+}
+
+function runFrame() {
+  var cut = execRows.length;
+  for (var i = 0; i < execRows.length; i++) {
+    if (execRows[i].type === 'header' && execRows[i].label === 'FRAME') { cut = i; break; }
+  }
+  execRows = execRows.slice(0, cut);
+  execRows.push({ type: 'header', label: 'FRAME' });
+  runSection(sections.frame, 'frame');
+}
+
+function renderExecTable() {
+  var tbody = document.querySelector('#etable tbody');
+  var html = '';
+  for (var i = 0; i < execRows.length; i++) {
+    var row = execRows[i];
+    if (row.type === 'header') {
+      html += '<tr class="section-header"><td colspan="2">── ' + row.label + ' ──</td></tr>';
+      continue;
+    }
+    if (row.type === 'comment') {
+      html += '<tr class="row-comment"><td colspan="2">' + esc(row.text) + '</td></tr>';
+      continue;
+    }
+    var cls = row.skipped ? 'row-skipped' : ('row-' + row.type);
+    var resolvedStr = row.resolved ? row.resolved.join('  ') : '';
+    var stackStr = row.stack && row.stack.length ? row.stack.map(fmt).join(' | ') : '';
+    html += '<tr class="' + cls + '"><td>' + resolvedStr + '</td><td>' + esc(stackStr) + '</td></tr>';
+  }
+  tbody.innerHTML = html;
+  var el = document.getElementById('exec-table');
+  el.scrollTop = el.scrollHeight;
+}
+
+function runOnce() {
+  if (!initDone) runInit();
+  runFrame();
+  drawSim();
+  updateVarList();
+  renderExecTable();
+}
+
+function toggleLoop() {
+  looping = !looping;
+  var btn = document.getElementById('btnloop');
+  if (looping) {
+    btn.textContent = 'STOP'; btn.style.color = '#f84';
+    if (!initDone) runInit();
+    function tick(ts) {
+      if (!looping) return;
+      var dt = ts - lastFrameTime;
+      if (dt > 0) document.getElementById('fps').textContent = Math.round(1000/dt) + ' fps';
+      lastFrameTime = ts;
+      runFrame(); drawSim(); updateVarList(); renderExecTable();
+      loopHandle = requestAnimationFrame(tick);
+    }
+    loopHandle = requestAnimationFrame(tick);
+  } else {
+    btn.textContent = 'LOOP'; btn.style.color = '';
+    cancelAnimationFrame(loopHandle);
+  }
+}
+
+function resetSim() {
+  looping = false; cancelAnimationFrame(loopHandle);
+  document.getElementById('btnloop').textContent = 'LOOP';
+  document.getElementById('btnloop').style.color = '';
+  vars = {}; initDone = false; execRows = []; sections = { init: [], frame: [] };
+  document.querySelector('#etable tbody').innerHTML = '';
+  document.getElementById('varlist').textContent = '';
+  document.getElementById('fps').textContent = '';
+  drawSim();
+}
+
+drawSim();
+</script>
+</body>
+</html>

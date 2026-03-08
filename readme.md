@@ -3,11 +3,37 @@
 ## how about CRISP for a name? like lisp but crisp
 ---
 
+# Links and refs
+Forth language: https://home.hccnet.nl/anij/
+
+https://www.forth.org/tutorials.html
 ## Execution Model
 
-- Grid scans **left to right**, **top to bottom**, once per tick
-- Every cell executes exactly once per tick - improve with execution on change only.
-- Writes are **collected during scan**, applied **after full scan completes**
+- Grid scans **left to right**, **top to bottom**
+- (only on bang!)Every cell executes exactly once per tick - improve with execution on change only.
+- Writes to  bottom  are executed right away.  writes
+- Writes  to right  
+	- Writes  to the right are executed on same frame, right after writer finishes,  and on bang.
+	- Operator can write to right indefinitely.
+	- Operator  can read right only from  adjacent cells.
+	
+
+```
+	execution order example
+	SET a RNDR  //  writes something random right
+	expression:
+          a : _ _ SQR _
+	execution
+          0 1 2    3     4   5
+          a : RNDR 0.345 SQR 0.11
+```
+|0. push a to stack
+|1. dereference to right - write RNDR
+|2. exec RNDR - write random value to right
+|3. push value 0.345 to stack
+|4. exec SQR, write to right.
+	      
+
 - No operator reads from below — bottom is write-only 
 
 ---
@@ -16,12 +42,15 @@
 1. **Observable Debuggability**
 	- this means that all outputs are transparent, and only references are implicit. no functions silently consumes or passes stuff around.
 	- for ex. 2 3 SUMR SET b - is invalid. SUMR will just overwrite SET kw.
+	- Even calls are explicit - via BANG (*)
 2. **Parallel spotwise-execution**.
 	- some fuunctions are processes that can start end and terminate, and execute more that once per tick. but output only at tick rate.
 	- nothing is executed without a BANG *
-3. **English letters only**. Time and again - strings are NAMES, or IDENTIFIERS not text not languages. we can have string as separate obj, but all language is ANSI charset.
-4. Nightmare of Fon Neuman - references can store functions, code can become mangled. SET a SUMR - valid.
+3. **English letters only**. Time and again - strings are NAMES, or IDENTIFIERS not text not languages. we can have string as separate obj, but all language is ANSI charset. 
+4. Nightmare of Fon Neuman - references can store functions, code can become mangled. SET a !SUMR - valid.
 5. Write once, Debug twice, read never. 
+6. Forced style - operators/methods are all CAPS or symbols. variables must start from lower case.
+
 
 
 ## Cell Types
@@ -183,6 +212,21 @@ LISTD :a b
 
 ```
 
+Saving delegates
+```
+SET abc !SQR // ! will negate execution,
+
+abc :D                 // :D dereferences down, well lol
+7   SQR  49
+
+
+SET op !:D
+
+op  :D
+abc :D
+    SQR
+```
+
 
 
 ## Lists
@@ -242,11 +286,11 @@ a0 and b0 are mulptiple params references.
 ```
               [u]
 DEF x y z [b] FNAME p q r [a]
-DEF FNAME
-	[l0] [l1] ADD
-	          * 3 [r0] MAXD
-	                   * RET d 2 // writes down 2   
-	                   R * RET r 0 // writes same to the right.
+DEF FNAME     
+    [l0] [l1] ADD
+              *   3 [r0] MAXD
+                         *    RET d   2    // writes down 2   
+                         R    *   RET r   0 // writes same to the right.
 	          
 ENDEF
 ```               
