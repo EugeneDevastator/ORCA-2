@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Stack Machine IDE</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+#toolbar { padding: 6px 10px; background: #2d2d2d; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button { background: #3a3a3a; color: #d4d4d4; border: 1px solid #555; padding: 4px 12px; cursor: pointer; font-family: monospace; }
+button:hover { background: #505050; }
+#panels { display: flex; flex: 1; overflow: hidden; }
+.panel { display: flex; flex-direction: column; flex: 1; border-right: 1px solid #333; overflow: hidden; min-width: 0; }
+.panel:last-child { border-right: none; }
+.panel-title { background: #2d2d2d; padding: 4px 8px; font-size: 12px; color: #888; border-bottom: 1px solid #333; flex-shrink: 0; }
+textarea { flex: 1; background: #1e1e1e; color: #d4d4d4; border: none; outline: none; padding: 8px; font-family: monospace; font-size: 14px; resize: none; line-height: 1.6; }
+.scroll-content { flex: 1; overflow-y: auto; overflow-x: auto; }
+.line-row { display: flex; min-height: 22px; line-height: 22px; padding: 0 8px; white-space: pre; font-size: 13px; }
+.current { background: #1a3a5a; }
+.done-row { color: #aaa; }
+#varview { min-width: 160px; max-width: 200px; flex: none; }
+.var-entry { padding: 1px 8px; }
+.var-name { color: #9cdcfe; }
+.var-val { color: #b5cea8; }
+#status { padding: 3px 10px; background: #2d2d2d; font-size: 12px; color: #888; border-top: 1px solid #333; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button onclick="loadFib()">Fib Example</button>
+  <span style="color:#555">|</span>
+  <button onclick="doStepOp()">Step Op</button>
+  <button onclick="doStepLine()">Step Line</button>
+  <button onclick="doRunAll()">▶ Run</button>
+  <span style="color:#555">|</span>
+  <button onclick="doReset()">Reset</button>
+  <button onclick="doClearAll()">Clear All</button>
+</div>
+<div id="panels">
+  <div class="panel">
+    <div class="panel-title">Code</div>
+    <textarea id="code" spellcheck="false"></textarea>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Runtime</div>
+    <div class="scroll-content" id="runtime"></div>
+  </div>
+  <div class="panel" style="max-width:120px;min-width:80px;flex:none;">
+    <div class="panel-title">Stack</div>
+    <div class="scroll-content" id="stackview"></div>
+  </div>
+  <div class="panel" id="varview">
+    <div class="panel-title">Variables</div>
+    <div class="scroll-content" id="vardisp"></div>
+  </div>
+</div>
+<div id="status">Ready.</div>
+
+<script>
+const FIB = `0 a SET
+1 b SET
+0 s SET
+a b flist SETL
+0 13 1 i FOR
+    a b SUM _ c SETV
+    c: flist APD
+    c s SUM _ s SETV
+    b a SETV
+    c b SETV
+END
+s LOG
+flist LOG`;
+
+// ── Values ─────────────────────────────────────────────────────
+function mkInt(v)  { return { t:'int',  v: v|0 }; }
+function mkFlt(v)  { return { t:'flt',  v: +v }; }
+function mkStr(v)  { return { t:'str',  v: String(v) }; }
+function mkBool(v) { return { t:'bool', v: !!v }; }
+function mkList(v) { return { t:'list', v: v }; }
+function mkSym(v)  { return { t:'sym',  v: v }; }
+function mkNum(v)  { return Number.isInteger(v) ? mkInt(v) : mkFlt(v); }
+
+function valStr(x) {
+  if (!x) return 'nil';
+  if (x.t === 'list') return '[' + x.v.map(valStr).join(', ') + ']';
+  if (x.t === 'bool') return x.v ? 'true' : 'false';
+  return String(x.v);
+}
+function toNum(x) {
+  if (!x) return 0;
+  if (x.t === 'int' || x.t === 'flt') return x.v;
+  if (x.t === 'bool') return x.v ? 1 : 0;
+  return parseFloat(x.v) || 0;
+}
+function deref(x, env) {
+  if (!x) return x;
+  if (x.t === 'sym') { let v = env[x.v]; return v !== undefined ? v : x; }
+  return x;
+}
+
+// ── Tokenizer ──────────────────────────────────────────────────
+const OPS = new Set(['SET','SETV','SETL','SETL*','SUM','SUB','MUL','DIV','MOD',
+                     'INC','DEC','APD','LOG','FOR','END','PSTACK']);
+
+function tokenize(line) {
+  let s = line.replace(/\/\/.*$/, '').trim();
+  let tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && s[i] === ' ') i++;
+    if (i >= s.length) break;
+    if (s[i] === '"') {
+      let j = i+1;
+      while (j < s.length && s[j] !== '"') j++;
+      tokens.push({ raw: s.slice(i,j+1), kind:'lit', val: mkStr(s.slice(i+1,j)) });
+      i = j+1; continue;
+    }
+    let j = i;
+    while (j < s.length && s[j] !== ' ') j++;
+    let tok = s.slice(i, j); i = j;
+    tokens.push(classifyToken(tok));
+  }
+  return tokens;
+}
+
+function classifyToken(tok) {
+  if (/^[a-zA-Z_][a-zA-Z0-9_]*:$/.test(tok))
+    return { raw: tok, kind:'deref', name: tok.slice(0,-1) };
+  if (tok === 'true')  return { raw: tok, kind:'lit', val: mkBool(true) };
+  if (tok === 'false') return { raw: tok, kind:'lit', val: mkBool(false) };
+  if (tok === '_')     return { raw: tok, kind:'op', op:'_' };
+  if (tok === ';')     return { raw: tok, kind:'op', op:';' };
+  if (/^-?\d+$/.test(tok))      return { raw: tok, kind:'lit', val: mkInt(parseInt(tok)) };
+  if (/^-?\d+\.\d+$/.test(tok)) return { raw: tok, kind:'lit', val: mkFlt(parseFloat(tok)) };
+  if (OPS.has(tok))   return { raw: tok, kind:'op', op: tok };
+  if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tok)) return { raw: tok, kind:'sym', name: tok };
+  return { raw: tok, kind:'unknown' };
+}
+
+// ── Program: flat array of lines ───────────────────────────────
+// Each line: { srcIdx, tokens, raw }
+// FOR/END are just tokens on their lines — PC jumps handle looping.
+
+function parseProgram(src) {
+  let srcLines = src.split('\n');
+  let prog = [];
+  for (let i = 0; i < srcLines.length; i++) {
+    let raw = srcLines[i];
+    let trimmed = raw.trim();
+    prog.push({ srcIdx: i, tokens: tokenize(trimmed), raw: trimmed });
+  }
+  // pre-compute FOR<->END jump table
+  // FOR line stores: forFrom, forTo, forStep, forVar, endPC
+  // END line stores: forPC (jump back target)
+  let forStack = [];
+  for (let i = 0; i < prog.length; i++) {
+    let toks = prog[i].tokens;
+    let hasFor = toks.some(t => t.kind==='op' && t.op==='FOR');
+    let hasEnd = toks.length === 1 && toks[0].kind==='op' && toks[0].op==='END';
+    if (hasFor) { forStack.push(i); prog[i].isFor = true; }
+    if (hasEnd) {
+      prog[i].isEnd = true;
+      if (forStack.length > 0) {
+        let fi = forStack.pop();
+        prog[fi].endPC = i;
+        prog[i].forPC = fi;
+      }
+    }
+  }
+  return prog;
+}
+
+// ── Interpreter state ──────────────────────────────────────────
+// PC = line index into prog
+// opIdx = token index within current line
+// Each line has a display result: { rtParts: [], stackSnap: [] }
+
+let S = null; // interpreter state
+
+function makeState(src) {
+  let prog = parseProgram(src);
+  let display = prog.map(() => ({ rtParts: [], stackSnap: [], visited: false }));
+  return {
+    prog,
+    display,
+    pc: 0,
+    opIdx: 0,
+    stack: [],       // current line stack
+    env: {},
+    logs: [],
+    done: false
+  };
+}
+
+// Execute one token at current PC/opIdx. Advances opIdx (and PC if line done).
+// Returns false if nothing left to do.
+function stepOneOp() {
+  if (!S || S.done) return false;
+  let prog = S.prog;
+
+  // skip blank/comment lines
+  while (S.pc < prog.length) {
+    let line = prog[S.pc];
+    if (line.tokens.length === 0) {
+      S.display[S.pc].visited = true;
+      S.display[S.pc].rtParts = [];
+      S.display[S.pc].stackSnap = [];
+      S.pc++;
+      S.opIdx = 0;
+      S.stack = [];
+      continue;
+    }
+    break;
+  }
+
+  if (S.pc >= prog.length) { S.done = true; return false; }
+
+  let line = prog[S.pc];
+  let disp = S.display[S.pc];
+  disp.visited = true;
+
+  // If opIdx is past end, advance PC
+  if (S.opIdx >= line.tokens.length) {
+    disp.stackSnap = S.stack.slice();
+    S.pc++;
+    S.opIdx = 0;
+    S.stack = [];
+    return true;
+  }
+
+  let tok = line.tokens[S.opIdx];
+  let rt = [];
+  let jumped = false;
+
+  // Special handling for FOR and END which affect PC
+  if (tok.kind === 'op' && tok.op === 'FOR') {
+    // Syntax: from to step varName FOR
+    // Pop: varName(sym), step, to, from
+    let varTok = S.stack.pop();
+    let step   = deref(S.stack.pop(), S.env);
+    let to     = deref(S.stack.pop(), S.env);
+    let from   = deref(S.stack.pop(), S.env);
+
+    if (!varTok || varTok.t !== 'sym') {
+      rt.push('FOR!missing-var');
+    } else {
+      let f = toNum(from), t2 = toNum(to), st = toNum(step);
+      // init loop var
+      S.env[varTok.v] = mkNum(f);
+      // store loop state on a loop stack
+      if (!S.loopStack) S.loopStack = [];
+      S.loopStack.push({ varName: varTok.v, to: t2, step: st, forPC: S.pc, endPC: line.endPC });
+      rt.push('FOR ' + varTok.v + '=' + f + ' to ' + t2 + ' step ' + st);
+      // check if loop should execute at all
+      if ((st > 0 && f > t2) || (st < 0 && f < t2)) {
+        // skip to END+1
+        S.pc = line.endPC + 1;
+        S.opIdx = 0;
+        S.stack = [];
+        jumped = true;
+      }
+    }
+    disp.rtParts.push(...rt);
+    if (!jumped) { S.opIdx++; }
+    disp.stackSnap = S.stack.slice();
+    return true;
+  }
+
+  if (tok.kind === 'op' && tok.op === 'END') {
+    // increment loop var, check condition, jump back or continue
+    if (!S.loopStack || S.loopStack.length === 0) {
+      rt.push('END!no-loop');
+      disp.rtParts.push(...rt);
+      S.opIdx++;
+      disp.stackSnap = S.stack.slice();
+      return true;
+    }
+    let loop = S.loopStack[S.loopStack.length - 1];
+    let cur = toNum(S.env[loop.varName]);
+    cur += loop.step;
+    S.env[loop.varName] = mkNum(cur);
+    let cont = loop.step > 0 ? cur <= loop.to : cur >= loop.to;
+    if (cont) {
+      // jump back to line after FOR
+      S.pc = loop.forPC + 1;
+      S.opIdx = 0;
+      S.stack = [];
+      rt.push('END→loop ' + loop.varName + '=' + cur);
+    } else {
+      // loop done
+      S.loopStack.pop();
+      S.pc++;
+      S.opIdx = 0;
+      S.stack = [];
+      rt.push('END→done ' + loop.varName + '=' + cur);
+    }
+    disp.rtParts.push(...rt);
+    disp.stackSnap = S.stack.slice();
+    return true;
+  }
+
+  // Normal token
+  execTok(tok, S.stack, S.env, S.logs, rt);
+  disp.rtParts.push(...rt);
+  S.opIdx++;
+
+  if (S.opIdx >= line.tokens.length) {
+    disp.stackSnap = S.stack.slice();
+    S.pc++;
+    S.opIdx = 0;
+    S.stack = [];
+  } else {
+    disp.stackSnap = S.stack.slice();
+  }
+  return true;
+}
+
+function execTok(tok, stack, env, logs, rt) {
+  if (tok.kind === 'lit') {
+    stack.push(tok.val); rt.push(valStr(tok.val)); return;
+  }
+  if (tok.kind === 'deref') {
+    let val = env[tok.name];
+    if (val !== undefined) { stack.push(val); rt.push(tok.raw + '→' + valStr(val)); }
+    else rt.push(tok.raw + '?');
+    return;
+  }
+  if (tok.kind === 'sym') {
+    stack.push(mkSym(tok.name)); rt.push(tok.raw); return;
+  }
+  if (tok.kind === 'unknown') { rt.push(tok.raw + '?'); return; }
+
+  let op = tok.op;
+  if (op === '_') {
+    let top = stack.pop();
+    if (top === undefined) { rt.push('_!'); return; }
+    let val = deref(top, env);
+    stack.push(val); rt.push(valStr(val)); return;
+  }
+  if (op === ';') { rt.push(';'); return; }
+  if (op === 'SET') {
+    let nm = stack.pop(), val = stack.pop();
+    if (!nm || nm.t !== 'sym') { rt.push('SET!'); return; }
+    env[nm.v] = deref(val, env);
+    stack.push(nm); rt.push('SET→' + nm.v + '=' + valStr(env[nm.v])); return;
+  }
+  if (op === 'SETV') {
+    let nm = stack.pop(), val = stack.pop();
+    if (!nm || nm.t !== 'sym') { rt.push('SETV!'); return; }
+    env[nm.v] = deref(val, env);
+    stack.push(nm); rt.push('SETV→' + nm.v + '=' + valStr(env[nm.v])); return;
+  }
+  if (op === 'SETL') {
+    let nm = stack.pop();
+    if (!nm || nm.t !== 'sym') { rt.push('SETL!'); return; }
+    let items = stack.splice(0).map(x => deref(x, env));
+    env[nm.v] = mkList(items);
+    stack.push(nm); rt.push('SETL→' + nm.v + '=[' + items.map(valStr).join(',') + ']'); return;
+  }
+  if (op === 'SETL*') {
+    let nm = stack.pop();
+    if (!nm || nm.t !== 'sym') { rt.push('SETL*!'); return; }
+    let items = stack.splice(0);
+    env[nm.v] = mkList(items);
+    stack.push(nm); rt.push('SETL*→' + nm.v); return;
+  }
+  if (op === 'SUM') {
+    let b = deref(stack.pop(), env), a = deref(stack.pop(), env);
+    if (!a || !b) { rt.push('SUM!'); return; }
+    let res = mkNum(toNum(a) + toNum(b));
+    stack.push(res); rt.push('SUM→' + valStr(res)); return;
+  }
+  if (op === 'SUB') {
+    let b = deref(stack.pop(), env), a = deref(stack.pop(), env);
+    if (!a || !b) { rt.push('SUB!'); return; }
+    let res = mkNum(toNum(a) - toNum(b));
+    stack.push(res); rt.push('SUB→' + valStr(res)); return;
+  }
+  if (op === 'MUL') {
+    let b = deref(stack.pop(), env), a = deref(stack.pop(), env);
+    if (!a || !b) { rt.push('MUL!'); return; }
+    let res = mkNum(toNum(a) * toNum(b));
+    stack.push(res); rt.push('MUL→' + valStr(res)); return;
+  }
+  if (op === 'DIV') {
+    let b = deref(stack.pop(), env), a = deref(stack.pop(), env);
+    if (!a || !b || toNum(b) === 0) { rt.push('DIV!'); return; }
+    let res = mkNum(toNum(a) / toNum(b));
+    stack.push(res); rt.push('DIV→' + valStr(res)); return;
+  }
+  if (op === 'MOD') {
+    let b = deref(stack.pop(), env), a = deref(stack.pop(), env);
+    if (!a || !b) { rt.push('MOD!'); return; }
+    let res = mkInt(toNum(a) % toNum(b));
+    stack.push(res); rt.push('MOD→' + valStr(res)); return;
+  }
+  if (op === 'INC') {
+    let nm = stack.pop();
+    if (!nm || nm.t !== 'sym') { rt.push('INC!'); return; }
+    let cur = env[nm.v] || mkInt(0);
+    env[nm.v] = mkNum(toNum(cur) + 1);
+    stack.push(env[nm.v]); rt.push('INC→' + nm.v + '=' + valStr(env[nm.v])); return;
+  }
+  if (op === 'DEC') {
+    let nm = stack.pop();
+    if (!nm || nm.t !== 'sym') { rt.push('DEC!'); return; }
+    let cur = env[nm.v] || mkInt(0);
+    env[nm.v] = mkNum(toNum(cur) - 1);
+    stack.push(env[nm.v]); rt.push('DEC→' + nm.v + '=' + valStr(env[nm.v])); return;
+  }
+  if (op === 'APD') {
+    let listNm = stack.pop(), val = deref(stack.pop(), env);
+    if (!listNm || listNm.t !== 'sym') { rt.push('APD!'); return; }
+    if (!env[listNm.v] || env[listNm.v].t !== 'list') env[listNm.v] = mkList([]);
+    env[listNm.v].v.push(val);
+    stack.push(listNm); rt.push('APD→' + listNm.v + '[' + env[listNm.v].v.length + ']'); return;
+  }
+  if (op === 'LOG') {
+    let val = deref(stack.pop(), env);
+    if (!val) { rt.push('LOG!'); return; }
+    logs.push(valStr(val));
+    rt.push('LOG:' + valStr(val)); return;
+  }
+  rt.push(op + '?');
+}
+
+// ── Controls ───────────────────────────────────────────────────
+function ensureState() {
+  if (!S) {
+    S = makeState(document.getElementById('code').value);
+    renderAll();
+  }
+}
+
+function doStepOp() {
+  ensureState();
+  stepOneOp();
+  renderAll();
+  setStatus(S.done ? 'Done.' : 'pc=' + S.pc + ' op=' + S.opIdx);
+}
+
+function doStepLine() {
+  ensureState();
+  if (S.done) { setStatus('Done.'); return; }
+  let startPc = S.pc;
+  let limit = 100000;
+  while (!S.done && S.pc === startPc && limit-- > 0) stepOneOp();
+  renderAll();
+  setStatus(S.done ? 'Done.' : 'pc=' + S.pc);
+}
+
+function doRunAll() {
+  ensureState();
+  let limit = 2000000;
+  while (!S.done && limit-- > 0) stepOneOp();
+  if (limit <= 0) setStatus('ERR: step limit');
+  else setStatus('Done. logs=' + S.logs.length);
+  renderAll();
+}
+
+function doReset() {
+  S = null;
+  clearDisplays();
+  setStatus('Reset.');
+}
+
+function doClearAll() {
+  S = null;
+  document.getElementById('code').value = '';
+  clearDisplays();
+  setStatus('Cleared.');
+}
+
+function loadFib() {
+  document.getElementById('code').value = FIB;
+  S = null;
+  clearDisplays();
+  setStatus('Loaded Fib.');
+}
+
+// ── Render ─────────────────────────────────────────────────────
+function renderAll() {
+  if (!S) return;
+  let prog = S.prog;
+  let rtEl = document.getElementById('runtime');
+  let stEl = document.getElementById('stackview');
+  let rtRows = [], stRows = [];
+
+  for (let i = 0; i < prog.length; i++) {
+    let disp = S.display[i];
+    let isCurrent = (i === S.pc && !S.done);
+    let cls = isCurrent ? 'current' : '';
+
+    let rtText = disp.rtParts.length ? disp.rtParts.join(' ') : (disp.visited ? '' : prog[i].raw);
+    let stText = disp.stackSnap.map(valStr).join(' ');
+
+    rtRows.push('<div class="line-row ' + cls + '">' + esc(rtText) + '</div>');
+    stRows.push('<div class="line-row ' + cls + '">' + esc(stText) + '</div>');
+  }
+
+  rtEl.innerHTML = rtRows.join('');
+  stEl.innerHTML = stRows.join('');
+
+  let vEl = document.getElementById('vardisp');
+  vEl.innerHTML = Object.entries(S.env).map(([k,v]) =>
+    '<div class="var-entry"><span class="var-name">' + k + '</span>=<span class="var-val">' + esc(valStr(v)) + '</span></div>'
+  ).join('');
+
+  if (!S.done) {
+    let cur = rtEl.querySelector('.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function clearDisplays() {
+  document.getElementById('runtime').innerHTML = '';
+  document.getElementById('stackview').innerHTML = '';
+  document.getElementById('vardisp').innerHTML = '';
+}
+
+function setStatus(s) { document.getElementById('status').textContent = s; }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+</script>
+</body>
+</html>

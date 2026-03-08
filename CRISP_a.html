@@ -18,6 +18,8 @@
   .row-init td { color: #8c8; }
   .row-frame td { color: #8af; }
   .section-header td { color: #555 !important; background: #0f0f0f; }
+  .ann { color: #555; font-size: 10px; }
+  .bang { color: #fa4 !important; }
 </style>
 </head>
 <body>
@@ -38,11 +40,11 @@ speed dir MUL _ SETTO step
 // x = x + step
 x step ADD _ SETTO x
 
-// if x > 540: dir = -1
-x 540 GT _ IFL -1 SETTO dir
+// if x > 540 then dir=-1 else keep dir
+x 540 GT _ -1 dir PICKIFL _ SETTO dir
 
-// if x < 20: dir = 1
-x 20 LT _ IFL 1 SETTO dir
+// if x < 20 then dir=1 else keep dir
+x 20 LT _ 1 dir PICKIFL _ SETTO dir
 
 // y = sin(x * 0.04) * 40 + 200
 x 0.04 MUL _ SIN _ 40 MUL _ 200 ADD _ SETTO y</textarea>
@@ -85,9 +87,9 @@ function drawSim() {
   var cx = vars['x'] !== undefined ? Number(vars['x']) : canvas.width / 2;
   var cy = vars['y'] !== undefined ? Number(vars['y']) : canvas.height / 2;
   var r  = vars['r']  !== undefined ? Number(vars['r'])  : 20;
-  ctx.beginPath(); ctx.arc(cx + 3, cy + 3, r, 0, Math.PI * 2);
+  ctx.beginPath(); ctx.arc(cx+3, cy+3, r, 0, Math.PI*2);
   ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fill();
-  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
   ctx.fillStyle = '#3af'; ctx.fill();
   ctx.strokeStyle = '#6cf'; ctx.lineWidth = 2; ctx.stroke();
 }
@@ -99,30 +101,35 @@ function updateVarList() {
   }).join('   ');
 }
 
-function isNum(s) { return s !== '' && s !== null && !isNaN(Number(s)); }
-
 function clean(v) {
-  // replace NaN/Infinity with -0 sentinel display, keep as 0 in runtime
-  if (typeof v === 'number') {
-    if (!isFinite(v) || isNaN(v)) return 0;
-  }
+  if (typeof v === 'number' && (!isFinite(v) || isNaN(v))) return 0;
   return v;
 }
 
 function fmt(v) {
-  if (v === null || v === undefined) return '-0';
+  if (v === null || v === undefined) return '0';
   if (Array.isArray(v)) return '[' + v.map(fmt).join(',') + ']';
   if (typeof v === 'number') {
-    if (!isFinite(v) || isNaN(v)) return '-0';
-    var s = +v.toFixed(4) + '';
-    return s;
+    if (!isFinite(v) || isNaN(v)) return '0';
+    return +v.toFixed(4) + '';
   }
   return String(v);
 }
 
 function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+var OPS = {
+  SET:1,SETTO:1,MUL:1,ADD:1,SUB:1,DIV:1,MOD:1,
+  GT:1,LT:1,GTE:1,LTE:1,EQ:1,AND:1,OR:1,
+  NEG:1,ABS:1,SIN:1,COS:1,FLOOR:1,CEIL:1,SQRT:1,NOT:1,
+  SUMR:1,AT:1,LEN:1,REPEAT:1,STACK:1,
+  PICKIFL:1,BANGIFL:1,BANG:1
+};
+
+function isOp(s) { return !!OPS[s]; }
+function isNum(s) { return s !== '' && !isNaN(Number(s)); }
 
 function resolveToken(tok) {
   if (isNum(tok)) return Number(tok);
@@ -137,161 +144,145 @@ function execLine(rawLine) {
   if (!line) return null;
 
   var tokens = line.split(/\s+/);
+  var slots = tokens.map(function(t) { return { src: t, ann: null, isBang: false }; });
   var stack = [];
-  var slots = tokens.map(function(t) { return { src: t, out: null, skipped: false }; });
-  var skipping = false;
 
-  function pop() {
-    if (!stack.length) return 0;
-    return stack.pop();
-  }
-  function push(v) {
-    v = clean(v);
-    stack.push(v);
-  }
-  function top() {
-    return stack.length ? stack[stack.length - 1] : 0;
-  }
+  function pop() { return stack.length ? stack.pop() : 0; }
+  function push(v) { v = clean(v); stack.push(v); }
+  function top() { return stack.length ? stack[stack.length-1] : 0; }
 
   var i = 0;
   while (i < tokens.length) {
-    if (skipping) {
-      slots[i].skipped = true;
-      i++; continue;
-    }
-
     var tok = tokens[i];
 
     if (tok === 'SET') {
-      var name = tokens[i + 1];
-      var val = resolveToken(tokens[i + 2]);
+      var name = tokens[i+1];
+      var val = resolveToken(tokens[i+2]);
       val = clean(val);
       vars[name] = val;
-      slots[i].out = 'SET';
-      slots[i + 1].out = name;
-      slots[i + 2].out = fmt(val);
+      slots[i+2].ann = fmt(val);
       push(val);
       i += 3; continue;
     }
 
     if (tok === 'SETTO') {
-      var name = tokens[i + 1];
+      var name = tokens[i+1];
       var val = pop();
       vars[name] = val;
-      slots[i].out = 'SETTO';
-      slots[i + 1].out = name + '=' + fmt(val);
+      slots[i+1].ann = fmt(val);
       i += 2; continue;
     }
 
     if (tok === '_') {
       var v = top();
       push(v);
-      slots[i].out = fmt(v);
+      slots[i].ann = fmt(v);
       i++; continue;
     }
 
-    if (tok === 'IFL') {
+    // PICKIFL: pops val_f, val_t, cond — pushes selected
+    if (tok === 'PICKIFL') {
+      var vf = pop();
+      var vt = pop();
       var cond = pop();
-      slots[i].out = fmt(cond);
-      if (!Number(cond)) skipping = true;
+      var res = Number(cond) ? vt : vf;
+      res = clean(res);
+      push(res);
+      slots[i].ann = fmt(res);
+      slots[i].isBang = true;
       i++; continue;
     }
 
-    // binary ops
+    // BANGIFL: pops val, cond — pushes val if cond else 0
+    if (tok === 'BANGIFL') {
+      var val = pop();
+      var cond = pop();
+      var res = Number(cond) ? val : 0;
+      res = clean(res);
+      push(res);
+      slots[i].ann = fmt(res);
+      slots[i].isBang = true;
+      i++; continue;
+    }
+
+    // BANG: pass-through, just marks visibility
+    if (tok === 'BANG') {
+      var v = top();
+      push(v);
+      slots[i].ann = fmt(v);
+      slots[i].isBang = true;
+      i++; continue;
+    }
+
     var binMap = { ADD:1,SUB:1,MUL:1,DIV:1,MOD:1,GT:1,LT:1,GTE:1,LTE:1,EQ:1,AND:1,OR:1 };
     if (binMap[tok]) {
-      var b = pop();
-      var a = pop();
-      var res = 0;
-      if      (tok === 'ADD') res = Number(a) + Number(b);
-      else if (tok === 'SUB') res = Number(a) - Number(b);
-      else if (tok === 'MUL') res = Number(a) * Number(b);
-      else if (tok === 'DIV') res = Number(b) !== 0 ? Number(a) / Number(b) : 0;
-      else if (tok === 'MOD') res = Number(b) !== 0 ? Number(a) % Number(b) : 0;
-      else if (tok === 'GT')  res = Number(a) > Number(b)  ? 1 : 0;
-      else if (tok === 'LT')  res = Number(a) < Number(b)  ? 1 : 0;
-      else if (tok === 'GTE') res = Number(a) >= Number(b) ? 1 : 0;
-      else if (tok === 'LTE') res = Number(a) <= Number(b) ? 1 : 0;
-      else if (tok === 'EQ')  res = String(a) === String(b) ? 1 : 0;
-      else if (tok === 'AND') res = (a && b) ? 1 : 0;
-      else if (tok === 'OR')  res = (a || b) ? 1 : 0;
+      var b = pop(), a = pop(), res = 0;
+      if      (tok==='ADD') res=Number(a)+Number(b);
+      else if (tok==='SUB') res=Number(a)-Number(b);
+      else if (tok==='MUL') res=Number(a)*Number(b);
+      else if (tok==='DIV') res=Number(b)!==0?Number(a)/Number(b):0;
+      else if (tok==='MOD') res=Number(b)!==0?Number(a)%Number(b):0;
+      else if (tok==='GT')  res=Number(a)>Number(b)?1:0;
+      else if (tok==='LT')  res=Number(a)<Number(b)?1:0;
+      else if (tok==='GTE') res=Number(a)>=Number(b)?1:0;
+      else if (tok==='LTE') res=Number(a)<=Number(b)?1:0;
+      else if (tok==='EQ')  res=String(a)===String(b)?1:0;
+      else if (tok==='AND') res=(a&&b)?1:0;
+      else if (tok==='OR')  res=(a||b)?1:0;
       res = clean(res);
       push(res);
-      slots[i].out = fmt(res);
+      slots[i].ann = fmt(res);
       i++; continue;
     }
 
-    // unary ops
     var unMap = { NEG:1,ABS:1,SIN:1,COS:1,FLOOR:1,CEIL:1,SQRT:1,NOT:1 };
     if (unMap[tok]) {
-      var a = pop();
-      var res = 0;
-      if      (tok === 'NEG')   res = -Number(a);
-      else if (tok === 'ABS')   res = Math.abs(Number(a));
-      else if (tok === 'SIN')   res = Math.sin(Number(a));
-      else if (tok === 'COS')   res = Math.cos(Number(a));
-      else if (tok === 'FLOOR') res = Math.floor(Number(a));
-      else if (tok === 'CEIL')  res = Math.ceil(Number(a));
-      else if (tok === 'SQRT')  res = Number(a) >= 0 ? Math.sqrt(Number(a)) : 0;
-      else if (tok === 'NOT')   res = a ? 0 : 1;
+      var a = pop(), res = 0;
+      if      (tok==='NEG')   res=-Number(a);
+      else if (tok==='ABS')   res=Math.abs(Number(a));
+      else if (tok==='SIN')   res=Math.sin(Number(a));
+      else if (tok==='COS')   res=Math.cos(Number(a));
+      else if (tok==='FLOOR') res=Math.floor(Number(a));
+      else if (tok==='CEIL')  res=Math.ceil(Number(a));
+      else if (tok==='SQRT')  res=Number(a)>=0?Math.sqrt(Number(a)):0;
+      else if (tok==='NOT')   res=a?0:1;
       res = clean(res);
       push(res);
-      slots[i].out = fmt(res);
+      slots[i].ann = fmt(res);
       i++; continue;
     }
 
-    if (tok === 'SUMR') {
-      var arr = pop();
-      if (!Array.isArray(arr)) arr = [arr];
-      var s = 0;
-      for (var ri = 0; ri < arr.length; ri++) s += Number(arr[ri]);
-      s = clean(s);
-      push(s);
-      slots[i].out = fmt(s);
-      i++; continue;
+    if (tok==='SUMR') {
+      var arr=pop(); if(!Array.isArray(arr)) arr=[arr];
+      var s=0; for(var ri=0;ri<arr.length;ri++) s+=Number(arr[ri]);
+      s=clean(s); push(s); slots[i].ann=fmt(s); i++; continue;
     }
-
-    if (tok === 'AT') {
-      var idx = pop();
-      var arr = pop();
-      if (!Array.isArray(arr)) arr = [arr];
-      var val = arr[Number(idx)];
-      if (val === undefined) val = 0;
-      val = clean(val);
-      push(val);
-      slots[i].out = fmt(val);
-      i++; continue;
+    if (tok==='AT') {
+      var idx=pop(),arr=pop();
+      if(!Array.isArray(arr)) arr=[arr];
+      var val=arr[Number(idx)]; if(val===undefined) val=0;
+      val=clean(val); push(val); slots[i].ann=fmt(val); i++; continue;
     }
-
-    if (tok === 'LEN') {
-      var arr = pop();
-      var val = Array.isArray(arr) ? arr.length : 1;
-      push(val);
-      slots[i].out = fmt(val);
-      i++; continue;
+    if (tok==='LEN') {
+      var arr=pop(); var val=Array.isArray(arr)?arr.length:1;
+      push(val); slots[i].ann=fmt(val); i++; continue;
     }
-
-    if (tok === 'REPEAT') {
-      var n = pop();
-      var val = pop();
-      var arr = [];
-      for (var ri = 0; ri < Number(n); ri++) arr.push(val);
-      push(arr);
-      slots[i].out = fmt(arr);
-      i++; continue;
+    if (tok==='REPEAT') {
+      var n=pop(),val=pop(),arr=[];
+      for(var ri=0;ri<Number(n);ri++) arr.push(val);
+      push(arr); slots[i].ann=fmt(arr); i++; continue;
     }
-
-    if (tok === 'STACK') {
-      push(stack.slice());
-      slots[i].out = 'STACK';
-      i++; continue;
+    if (tok==='STACK') {
+      push(stack.slice()); slots[i].ann='stack'; i++; continue;
     }
 
     // plain value or variable
     var rv = resolveToken(tok);
     if (typeof rv === 'number') rv = clean(rv);
     push(rv);
-    slots[i].out = fmt(rv);
+    if (!isNum(tok) && !isOp(tok)) {
+      slots[i].ann = fmt(rv);
+    }
     i++;
   }
 
@@ -304,10 +295,10 @@ function parseSections(src) {
   var section = null;
   for (var i = 0; i < lines.length; i++) {
     var t = lines[i].trim();
-    if (t === 'INIT')  { section = 'init';  continue; }
-    if (t === 'FRAME') { section = 'frame'; continue; }
-    if (section === 'init')  init.push(lines[i]);
-    else if (section === 'frame') frame.push(lines[i]);
+    if (t==='INIT')  { section='init';  continue; }
+    if (t==='FRAME') { section='frame'; continue; }
+    if (section==='init')  init.push(lines[i]);
+    else if (section==='frame') frame.push(lines[i]);
   }
   return { init: init, frame: frame };
 }
@@ -320,9 +311,7 @@ function runSection(lines, type) {
     var raw = lines[i];
     var trimmed = raw.trim();
     if (!trimmed) continue;
-    if (trimmed.startsWith('//')) {
-      execRows.push({ type: 'comment', text: trimmed }); continue;
-    }
+    if (trimmed.startsWith('//')) { execRows.push({ type:'comment', text:trimmed }); continue; }
     var r = execLine(raw);
     if (!r) continue;
     execRows.push({ type: type, slots: r.slots, stack: r.stack });
@@ -332,7 +321,7 @@ function runSection(lines, type) {
 function runInit() {
   sections = parseSections(document.getElementById('editor').value);
   execRows = [];
-  execRows.push({ type: 'header', label: 'INIT' });
+  execRows.push({ type:'header', label:'INIT' });
   runSection(sections.init, 'init');
   initDone = true;
 }
@@ -340,10 +329,10 @@ function runInit() {
 function runFrame() {
   var cut = execRows.length;
   for (var i = 0; i < execRows.length; i++) {
-    if (execRows[i].type === 'header' && execRows[i].label === 'FRAME') { cut = i; break; }
+    if (execRows[i].type==='header' && execRows[i].label==='FRAME') { cut=i; break; }
   }
   execRows = execRows.slice(0, cut);
-  execRows.push({ type: 'header', label: 'FRAME' });
+  execRows.push({ type:'header', label:'FRAME' });
   runSection(sections.frame, 'frame');
 }
 
@@ -352,21 +341,22 @@ function renderExecTable() {
   var html = '';
   for (var i = 0; i < execRows.length; i++) {
     var row = execRows[i];
-    if (row.type === 'header') {
-      html += '<tr class="section-header"><td>── ' + row.label + ' ──</td></tr>';
-      continue;
+    if (row.type==='header') {
+      html += '<tr class="section-header"><td>── '+row.label+' ──</td></tr>'; continue;
     }
-    if (row.type === 'comment') {
-      html += '<tr class="row-comment"><td>' + esc(row.text) + '</td></tr>';
-      continue;
+    if (row.type==='comment') {
+      html += '<tr class="row-comment"><td>'+esc(row.text)+'</td></tr>'; continue;
     }
     var parts = row.slots.map(function(s) {
-      var txt = esc(s.out !== null ? s.out : s.src);
-      if (s.skipped) return '<span style="color:#522">' + txt + '</span>';
-      return txt;
+      var srcHtml = esc(s.src);
+      if (s.isBang) srcHtml = '<span class="bang">'+srcHtml+'</span>';
+      if (s.ann !== null && s.ann !== s.src) {
+        return srcHtml + '<span class="ann">:'+esc(s.ann)+'</span>';
+      }
+      return srcHtml;
     });
     var cls = 'row-' + row.type;
-    html += '<tr class="' + cls + '"><td>' + parts.join(' ') + '</td></tr>';
+    html += '<tr class="'+cls+'"><td>'+parts.join(' ')+'</td></tr>';
   }
   tbody.innerHTML = html;
   var el = document.getElementById('exec-table');
@@ -376,9 +366,7 @@ function renderExecTable() {
 function runOnce() {
   if (!initDone) runInit();
   runFrame();
-  drawSim();
-  updateVarList();
-  renderExecTable();
+  drawSim(); updateVarList(); renderExecTable();
 }
 
 function toggleLoop() {
@@ -390,7 +378,7 @@ function toggleLoop() {
     function tick(ts) {
       if (!looping) return;
       var dt = ts - lastFrameTime;
-      if (dt > 0) document.getElementById('fps').textContent = Math.round(1000 / dt) + ' fps';
+      if (dt > 0) document.getElementById('fps').textContent = Math.round(1000/dt)+' fps';
       lastFrameTime = ts;
       runFrame(); drawSim(); updateVarList(); renderExecTable();
       loopHandle = requestAnimationFrame(tick);
@@ -406,7 +394,7 @@ function resetSim() {
   looping = false; cancelAnimationFrame(loopHandle);
   document.getElementById('btnloop').textContent = 'LOOP';
   document.getElementById('btnloop').style.color = '';
-  vars = {}; initDone = false; execRows = []; sections = { init: [], frame: [] };
+  vars = {}; initDone = false; execRows = []; sections = { init:[], frame:[] };
   document.querySelector('#etable tbody').innerHTML = '';
   document.getElementById('varlist').textContent = '';
   document.getElementById('fps').textContent = '';
