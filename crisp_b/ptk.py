@@ -8,6 +8,19 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
+# ── Console (global output) ───────────────────────────────────────────────────
+console_lines = []
+console_buf = Buffer(name='console', multiline=True, read_only=True)
+
+def console_write(s):
+    console_lines.append(s)
+    text = '\n'.join(console_lines)
+    console_buf.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
+
+def console_clear():
+    console_lines.clear()
+    console_buf.set_document(Document('', cursor_position=0), bypass_readonly=True)
+
 # ── Value constructors ────────────────────────────────────────────────────────
 def mk_int(v):  return ('int',  int(v))
 def mk_flt(v):  return ('flt',  float(v))
@@ -32,25 +45,20 @@ def to_num(x):
     try: return float(v)
     except: return 0
 
-def deref_one(x, env):
-    """Resolve exactly one level: sym->value. Non-sym returned as-is."""
-    if x is None: return x
-    if x[0] == 'sym':
-        return env.get(x[1], x)
-    return x
-
-def popd(stack, env):
-    """Pop and fully resolve for arithmetic ops."""
-    x = stack.pop() if stack else None
-    # fully resolve chain for numeric ops
+def full_deref(x, env):
     seen = set()
     while x is not None and x[0] == 'sym':
         name = x[1]
         if name in seen: break
         seen.add(name)
-        x = env.get(name, x)
-        if x[0] == 'sym' and x[1] == name: break
+        nxt = env.get(name)
+        if nxt is None: break
+        x = nxt
     return x
+
+def popd(stack, env):
+    x = stack.pop() if stack else None
+    return full_deref(x, env)
 
 # ── Tokenizer ─────────────────────────────────────────────────────────────────
 OP_NAMES = {'SET','SETV','SETL','SETL*','SUM','SUB','MUL','DIV','MOD','INC','DEC','APD','LOG','PSTACK','FOR','END'}
@@ -65,7 +73,8 @@ def classify_token(tok):
     if re.match(r'^-?\d+$', tok):      return ('lit', mk_int(int(tok)))
     if re.match(r'^-?\d+\.\d+$', tok): return ('lit', mk_flt(float(tok)))
     if tok in OP_NAMES:                return ('op', tok)
-    # all lowercase-starting identifiers are symbols
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*:$', tok):
+        return ('deref', tok[:-1])
     if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', tok): return ('sym', tok)
     return ('unknown', tok)
 
@@ -112,16 +121,23 @@ def parse_program(src):
                 line['for_pc'] = fi
     return prog
 
-# ── Ops ───────────────────────────────────────────────────────────────────────
-def op_set(stack, env, logs, rt):
+# ── Ops (no logs param — use console_write directly) ─────────────────────────
+def op_set(stack, env, rt):
     nm  = stack.pop() if stack else None
     val = stack.pop() if stack else None
     if not nm or nm[0] != 'sym': rt.append('SET!'); return
-    # store raw — do NOT deref. sym can store sym.
     env[nm[1]] = val
     stack.append(nm); rt.append('SET')
 
-def op_setl(stack, env, logs, rt):
+def op_setv(stack, env, rt):
+    nm  = stack.pop() if stack else None
+    val = stack.pop() if stack else None
+    if not nm or nm[0] != 'sym': rt.append('SETV!'); return
+    val = full_deref(val, env)
+    env[nm[1]] = val
+    stack.append(nm); rt.append('SETV')
+
+def op_setl(stack, env, rt):
     nm = stack.pop() if stack else None
     if not nm or nm[0] != 'sym': rt.append('SETL!'); return
     items = list(stack)
@@ -129,51 +145,51 @@ def op_setl(stack, env, logs, rt):
     env[nm[1]] = mk_list(items)
     stack.append(nm); rt.append('SETL')
 
-def op_sum(stack, env, logs, rt):
+def op_sum(stack, env, rt):
     b = popd(stack,env); a = popd(stack,env)
     if a is None or b is None: rt.append('SUM!'); return
     res = mk_num(to_num(a) + to_num(b))
     stack.append(res); rt.append('SUM ' + val_str(res))
 
-def op_sub(stack, env, logs, rt):
+def op_sub(stack, env, rt):
     b = popd(stack,env); a = popd(stack,env)
     if a is None or b is None: rt.append('SUB!'); return
     res = mk_num(to_num(a) - to_num(b))
     stack.append(res); rt.append('SUB ' + val_str(res))
 
-def op_mul(stack, env, logs, rt):
+def op_mul(stack, env, rt):
     b = popd(stack,env); a = popd(stack,env)
     if a is None or b is None: rt.append('MUL!'); return
     res = mk_num(to_num(a) * to_num(b))
     stack.append(res); rt.append('MUL ' + val_str(res))
 
-def op_div(stack, env, logs, rt):
+def op_div(stack, env, rt):
     b = popd(stack,env); a = popd(stack,env)
     if a is None or b is None or to_num(b) == 0: rt.append('DIV!'); return
     res = mk_num(to_num(a) / to_num(b))
     stack.append(res); rt.append('DIV ' + val_str(res))
 
-def op_mod(stack, env, logs, rt):
+def op_mod(stack, env, rt):
     b = popd(stack,env); a = popd(stack,env)
     if a is None or b is None: rt.append('MOD!'); return
     res = mk_int(int(to_num(a)) % int(to_num(b)))
     stack.append(res); rt.append('MOD ' + val_str(res))
 
-def op_inc(stack, env, logs, rt):
+def op_inc(stack, env, rt):
     nm = stack.pop() if stack else None
     if not nm or nm[0] != 'sym': rt.append('INC!'); return
     cur = env.get(nm[1], mk_int(0))
     env[nm[1]] = mk_num(to_num(cur) + 1)
     stack.append(env[nm[1]]); rt.append('INC')
 
-def op_dec(stack, env, logs, rt):
+def op_dec(stack, env, rt):
     nm = stack.pop() if stack else None
     if not nm or nm[0] != 'sym': rt.append('DEC!'); return
     cur = env.get(nm[1], mk_int(0))
     env[nm[1]] = mk_num(to_num(cur) - 1)
     stack.append(env[nm[1]]); rt.append('DEC')
 
-def op_apd(stack, env, logs, rt):
+def op_apd(stack, env, rt):
     list_nm = stack.pop() if stack else None
     val = stack.pop() if stack else None
     if not list_nm or list_nm[0] != 'sym': rt.append('APD!'); return
@@ -182,29 +198,21 @@ def op_apd(stack, env, logs, rt):
     env[list_nm[1]][1].append(val)
     stack.append(list_nm); rt.append('APD')
 
-def op_log(stack, env, logs, rt):
+def op_log(stack, env, rt):
+    # Pops top, resolves, writes to console
     val = stack.pop() if stack else None
     if val is None: rt.append('LOG!'); return
-    # fully resolve for display
-    resolved = val
-    seen = set()
-    while resolved is not None and resolved[0] == 'sym':
-        name = resolved[1]
-        if name in seen: break
-        seen.add(name)
-        nxt = env.get(name)
-        if nxt is None: break
-        resolved = nxt
-    logs.append(val_str(resolved))
-    rt.append('LOG ' + val_str(resolved))
+    resolved = full_deref(val, env)
+    s = val_str(resolved)
+    console_write(s)
+    rt.append('LOG')
 
-def op_pstack(stack, env, logs, rt):
-    s = ' '.join(val_str(x) for x in stack)
-    logs.append('STACK: ' + s)
+def op_pstack(stack, env, rt):
+    s = 'STACK: ' + ' '.join(val_str(x) for x in stack)
+    console_write(s)
     rt.append('PSTACK')
 
-def op_deref_op(stack, env, logs, rt):
-    """`:` — pop top sym, push its stored value (one level)."""
+def op_deref_op(stack, env, rt):
     top = stack.pop() if stack else None
     if top is None: rt.append(':!'); return
     if top[0] == 'sym':
@@ -215,22 +223,19 @@ def op_deref_op(stack, env, logs, rt):
         stack.append(top)
         rt.append(':~')
 
-def op_underscore(stack, env, logs, rt):
-    """
-    `_` — pop top, push as-is (identity / display marker).
-    Does NOT dereference. Use `:` to deref.
-    """
+def op_underscore(stack, env, rt):
     top = stack.pop() if stack else None
     if top is None: rt.append('_!'); return
     stack.append(top)
     rt.append(val_str(top))
 
 OP_MAP = {
-    'SET': op_set, 'SETV': op_set, 'SETL': op_setl, 'SETL*': op_setl,
-    'SUM': op_sum, 'SUB': op_sub, 'MUL': op_mul, 'DIV': op_div, 'MOD': op_mod,
-    'INC': op_inc, 'DEC': op_dec, 'APD': op_apd, 'LOG': op_log, 'PSTACK': op_pstack,
-    ':': op_deref_op,
-    '_': op_underscore,
+    'SET':   op_set,   'SETV': op_setv,  'SETL': op_setl, 'SETL*': op_setl,
+    'SUM':   op_sum,   'SUB':  op_sub,   'MUL':  op_mul,  'DIV':   op_div,  'MOD': op_mod,
+    'INC':   op_inc,   'DEC':  op_dec,   'APD':  op_apd,
+    'LOG':   op_log,   'PSTACK': op_pstack,
+    ':':     op_deref_op,
+    '_':     op_underscore,
 }
 
 # ── Execution ─────────────────────────────────────────────────────────────────
@@ -238,7 +243,7 @@ def make_state(src):
     prog = parse_program(src)
     display = [{'rt_parts': [], 'stack_snap': [], 'visited': False} for _ in prog]
     return {'prog': prog, 'display': display, 'pc': 0, 'op_idx': 0,
-            'stack': [], 'env': {}, 'logs': [], 'loop_stack': [], 'done': False}
+            'stack': [], 'env': {}, 'loop_stack': [], 'done': False}
 
 def step_one_op(S):
     prog = S['prog']
@@ -307,7 +312,7 @@ def step_one_op(S):
         disp['stack_snap'] = list(S['stack'])
         return True
 
-    exec_tok(tok, S['stack'], S['env'], S['logs'], rt)
+    exec_tok(tok, S['stack'], S['env'], rt)
     disp['rt_parts'].extend(rt)
     S['op_idx'] += 1
     if S['op_idx'] >= len(line['tokens']):
@@ -317,30 +322,34 @@ def step_one_op(S):
         disp['stack_snap'] = list(S['stack'])
     return True
 
-def exec_tok(tok, stack, env, logs, rt):
+def exec_tok(tok, stack, env, rt):
     kind = tok[0]
     if kind == 'lit':
         stack.append(tok[1]); rt.append(val_str(tok[1])); return
     if kind == 'sym':
         stack.append(mk_sym(tok[1])); rt.append(tok[1]); return
+    if kind == 'deref':
+        name = tok[1]
+        val = full_deref(mk_sym(name), env)
+        stack.append(val)
+        rt.append(val_str(val))
+        return
     if kind == 'unknown':
         rt.append(tok[1] + '?'); return
     op = tok[1]
     handler = OP_MAP.get(op)
-    if handler: handler(stack, env, logs, rt); return
+    if handler: handler(stack, env, rt); return
     rt.append(op + '?')
 
-# ── Scroll / display state ────────────────────────────────────────────────────
+# ── UI state ──────────────────────────────────────────────────────────────────
 hscroll = [0, 0, 0]
-PANEL_W = 40
-
-state = {'S': None, 'status': 'Ready. F5=Run F6=StepLine F7=StepOp F8=Reset  Tab=panel Shift+LR=hscroll'}
+state = {'S': None, 'status': 'F5=Run F6=StepLine F7=StepOp F8=Reset  Tab=panel Shift+LR=hscroll'}
 
 code_buf = Buffer(name='code', multiline=True)
 DEMO = """5 x SET
-x y SET
-x : _ LOG
-y : : _ LOG
+x y SETV
+x: LOG
+y: LOG
 
 // fib with sum
 0 a SET
@@ -348,37 +357,37 @@ y : : _ LOG
 0 s SET
 a b flist SETL
 0 13 1 i FOR
-    a b SUM _ c SETV
+    a: b: SUM _ c SETV
     c flist APD
-    c s SUM _ s SETV
-    b a SETV
-    c b SETV
+    c: s: SUM _ s SETV
+    b: a SETV
+    c: b SETV
 END
-s LOG
-flist LOG"""
+s: LOG
+flist: LOG"""
 code_buf.set_document(Document(DEMO))
+
+runtime_buf = Buffer(name='runtime', multiline=True, read_only=True)
+
+def refresh_runtime_buf():
+    S = state['S']
+    off = hscroll[0]
+    lines = []
+    if S is None:
+        for ln in code_buf.text.split('\n'):
+            lines.append(clip_line(ln, off))
+    else:
+        for i, line in enumerate(S['prog']):
+            disp = S['display'][i]
+            text = ' '.join(disp['rt_parts']) if disp['rt_parts'] else \
+                (' '.join(tok_raw(t) for t in line['tokens']) if not disp['visited'] else '')
+            lines.append(clip_line(text, off))
+    new_text = '\n'.join(lines)
+    runtime_buf.set_document(Document(new_text, cursor_position=0), bypass_readonly=True)
 
 def clip_line(text, offset):
     if offset >= len(text): return ''
     return text[offset:]
-
-def get_runtime_text():
-    S = state['S']
-    off = hscroll[0]
-    if S is None:
-        result = []
-        for ln in code_buf.text.split('\n'):
-            result.append(('class:dim', clip_line(ln, off) + '\n'))
-        return result
-    result = []
-    for i, line in enumerate(S['prog']):
-        disp = S['display'][i]
-        is_cur = (i == S['pc'] and not S['done'])
-        text = ' '.join(disp['rt_parts']) if disp['rt_parts'] else \
-            (' '.join(tok_raw(t) for t in line['tokens']) if not disp['visited'] else '')
-        style = 'class:cursor_line' if is_cur else ('class:dim' if not disp['visited'] else '')
-        result.append((style, clip_line(text, off) + '\n'))
-    return result
 
 def get_stack_text():
     S = state['S']
@@ -387,10 +396,8 @@ def get_stack_text():
     result = []
     for i in range(len(S['prog'])):
         disp = S['display'][i]
-        is_cur = (i == S['pc'] and not S['done'])
-        style = 'class:cursor_line' if is_cur else ''
         snap_str = ' '.join(val_str(x) for x in disp['stack_snap'])
-        result.append((style, clip_line(snap_str, off) + '\n'))
+        result.append(('', clip_line(snap_str, off) + '\n'))
     return result
 
 def get_vars_text():
@@ -403,14 +410,6 @@ def get_vars_text():
         result.append(('', clip_line(line, off) + '\n'))
     return result
 
-def get_logs_text():
-    S = state['S']
-    if S is None: return [('', '')]
-    result = []
-    for entry in S['logs']:
-        result.append(('', entry + '\n'))
-    return result
-
 def get_status_text():
     return [('class:status', ' ' + state['status'] + ' ')]
 
@@ -420,11 +419,9 @@ def tok_raw(tok):
     if k == 'deref': return tok[1] + ':'
     return tok[1]
 
-runtime_ctrl = FormattedTextControl(get_runtime_text, focusable=False)
-stack_ctrl   = FormattedTextControl(get_stack_text,   focusable=False)
-vars_ctrl    = FormattedTextControl(get_vars_text,    focusable=False)
-logs_ctrl    = FormattedTextControl(get_logs_text,    focusable=False)
-status_ctrl  = FormattedTextControl(get_status_text,  focusable=False)
+stack_ctrl  = FormattedTextControl(get_stack_text, focusable=False)
+vars_ctrl   = FormattedTextControl(get_vars_text,  focusable=False)
+status_ctrl = FormattedTextControl(get_status_text, focusable=False)
 
 focused_panel = [0]
 
@@ -435,12 +432,14 @@ def ensure_state():
         state['S'] = make_state(code_buf.text)
 
 def do_run():
+    console_clear()
     state['S'] = make_state(code_buf.text)
     S = state['S']
     limit = 2_000_000
     while not S['done'] and limit > 0:
         step_one_op(S); limit -= 1
-    set_status('Done. logs=' + str(len(S['logs'])) if limit > 0 else 'ERR: step limit')
+    set_status('Done.' if limit > 0 else 'ERR: step limit')
+    refresh_runtime_buf()
 
 def do_step_line():
     ensure_state()
@@ -451,15 +450,19 @@ def do_step_line():
     while not S['done'] and S['pc'] == start_pc and limit > 0:
         step_one_op(S); limit -= 1
     set_status('pc=' + str(S['pc']))
+    refresh_runtime_buf()
 
 def do_step_op():
     ensure_state()
     S = state['S']
     step_one_op(S)
     set_status('Done.' if S['done'] else 'pc=' + str(S['pc']) + ' op=' + str(S['op_idx']))
+    refresh_runtime_buf()
 
 def do_reset():
     state['S'] = None
+    console_clear()
+    refresh_runtime_buf()
     set_status('Reset.')
 
 kb = KeyBindings()
@@ -482,11 +485,13 @@ def _(event): event.app.exit()
 @kb.add('s-left')
 def _(event):
     hscroll[focused_panel[0]] = max(0, hscroll[focused_panel[0]] - 4)
+    refresh_runtime_buf()
     event.app.invalidate()
 
 @kb.add('s-right')
 def _(event):
     hscroll[focused_panel[0]] += 4
+    refresh_runtime_buf()
     event.app.invalidate()
 
 @kb.add('tab')
@@ -499,24 +504,22 @@ style = Style.from_dict({
     '':             'bg:#f8f8f8 #222222',
     'frame.border': '#aaaaaa',
     'frame.label':  '#0055cc bold',
-    'cursor_line':  'bg:#ddeeff #000000',
-    'dim':          '#aaaaaa',
     'status':       'bg:#dddddd #333333',
 })
 
 layout = Layout(
     HSplit([
         VSplit([
-            Frame(Window(BufferControl(buffer=code_buf), wrap_lines=False, width=36), title='Code'),
-            Frame(Window(runtime_ctrl, wrap_lines=False, width=28),                   title='Runtime'),
-            Frame(Window(stack_ctrl,   wrap_lines=False, width=12),                   title='Stack'),
-            Frame(Window(vars_ctrl,    wrap_lines=False, width=12),                   title='Vars'),
-            Frame(Window(logs_ctrl,    wrap_lines=False, width=14),                   title='Logs'),
+            Frame(Window(BufferControl(buffer=code_buf),                    wrap_lines=False, width=46), title='Code'),
+            Frame(Window(BufferControl(buffer=runtime_buf, focusable=True), wrap_lines=False, width=28), title='Runtime'),
+            Frame(Window(stack_ctrl,                                        wrap_lines=False, width=12), title='Stack'),
+            Frame(Window(vars_ctrl,                                         wrap_lines=False, width=16), title='Vars'),
         ]),
+        Frame(Window(BufferControl(buffer=console_buf, focusable=True), wrap_lines=True, height=8), title='Console'),
         Window(status_ctrl, height=1),
     ])
 )
 
 app = Application(layout=layout, key_bindings=kb, style=style,
-                  full_screen=True, mouse_support=True)
+                  full_screen=True, mouse_support=False)
 app.run()
