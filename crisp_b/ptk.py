@@ -99,9 +99,7 @@ def tokenize(line):
 
 # ── Tokenize a raw source line into styled spans (for code panel) ─────────────
 def highlight_source_line(raw):
-    """Returns list of (style, text) for one source line."""
     result = []
-    # comment
     ci = raw.find('//')
     code_part = raw[:ci] if ci >= 0 else raw
     comment_part = raw[ci:] if ci >= 0 else ''
@@ -109,36 +107,28 @@ def highlight_source_line(raw):
     s = code_part
     i = 0
     while i < len(s):
-        # spaces
         j = i
         while j < len(s) and s[j] == ' ': j += 1
         if j > i:
             result.append(('', s[i:j]))
             i = j
             continue
-        # string literal
         if s[i] == '"':
             j = i + 1
             while j < len(s) and s[j] != '"': j += 1
             result.append(('class:code.lit', s[i:j+1]))
             i = j + 1
             continue
-        # word
         j = i
         while j < len(s) and s[j] != ' ': j += 1
         word = s[i:j]
         tok = classify_token(word)
         k = tok[0]
-        if k == 'lit':
-            result.append(('class:code.lit', word))
-        elif k == 'op':
-            result.append(('class:code.op', word))
-        elif k == 'deref':
-            result.append(('class:code.deref', word))
-        elif k == 'sym':
-            result.append(('class:code.sym', word))
-        else:
-            result.append(('class:code.unknown', word))
+        if k == 'lit':     result.append(('class:code.lit',     word))
+        elif k == 'op':    result.append(('class:code.op',      word))
+        elif k == 'deref': result.append(('class:code.deref',   word))
+        elif k == 'sym':   result.append(('class:code.sym',     word))
+        else:              result.append(('class:code.unknown', word))
         i = j
 
     if comment_part:
@@ -403,7 +393,9 @@ def exec_tok(tok, stack, env, rt):
 
 # ── UI state ──────────────────────────────────────────────────────────────────
 hscroll = [0, 0, 0]
-state = {'S': None, 'status': 'F5=Run F6=StepLine F7=StepOp F8=Reset  Tab=panel Shift+LR=hscroll'}
+state = {'S': None, 'status': 'Ready.'}
+
+HELP_TEXT = 'F5=Run  F6=StepLine  F7=StepOp  F8=Reset  Tab=panel  Shift+LR=hscroll  Ctrl+Q=quit'
 
 code_buf = Buffer(name='code', multiline=True)
 DEMO = """5 x SET
@@ -445,13 +437,7 @@ def clip_styled(parts, offset):
                 skipped = offset
     return result
 
-def tok_raw(tok):
-    k = tok[0]
-    if k == 'lit':   return val_str(tok[1])
-    if k == 'deref': return tok[1] + ':'
-    return tok[1]
-
-# ── Code panel (always highlighted, reads code_buf live) ─────────────────────
+# ── Code panel ────────────────────────────────────────────────────────────────
 def get_code_text():
     off = hscroll[0]
     result = []
@@ -468,7 +454,6 @@ def get_runtime_text():
     off = hscroll[1]
     result = []
     if S is None:
-        # mirror code panel highlighted
         for raw in code_buf.text.split('\n'):
             spans = highlight_source_line(raw)
             clipped = clip_styled(spans, off)
@@ -480,7 +465,6 @@ def get_runtime_text():
             if disp['rt_parts']:
                 parts = disp['rt_parts']
             elif not disp['visited']:
-                # show highlighted source
                 parts = highlight_source_line(line['raw'])
             else:
                 parts = []
@@ -516,16 +500,21 @@ def get_vars_text():
         result.append(('', '\n'))
     return result
 
-def get_status_text():
-    return [('class:status', ' ' + state['status'] + ' ')]
+# ── Status bar: left=message, right=fixed help ────────────────────────────────
+def get_status_left():
+    return [('class:status.msg', ' ' + state['status'] + ' ')]
+
+def get_status_right():
+    return [('class:status.help', ' ' + HELP_TEXT + ' ')]
 
 code_ctrl    = FormattedTextControl(get_code_text,    focusable=False)
 runtime_ctrl = FormattedTextControl(get_runtime_text, focusable=False)
 stack_ctrl   = FormattedTextControl(get_stack_text,   focusable=False)
 vars_ctrl    = FormattedTextControl(get_vars_text,    focusable=False)
-status_ctrl  = FormattedTextControl(get_status_text,  focusable=False)
+status_left_ctrl  = FormattedTextControl(get_status_left,  focusable=False)
+status_right_ctrl = FormattedTextControl(get_status_right, focusable=False)
 
-focused_panel = [0]  # 0=Code, 1=Runtime, 2=Stack  (vars shares with stack scroll)
+focused_panel = [0]
 
 def set_status(s): state['status'] = s
 
@@ -600,7 +589,8 @@ style = Style.from_dict({
     '':                'bg:#f8f8f8 #222222',
     'frame.border':    '#aaaaaa',
     'frame.label':     '#0055cc bold',
-    'status':          'bg:#dddddd #333333',
+    'status.msg':      'bg:#dddddd #333333',
+    'status.help':     'bg:#cccccc #555555',
     # code panel
     'code.lit':        '#aa6600',
     'code.op':         '#0055cc bold',
@@ -626,7 +616,10 @@ layout = Layout(
             Frame(Window(vars_ctrl,    wrap_lines=False, width=16), title='Vars'),
         ]),
         Frame(Window(BufferControl(buffer=console_buf, focusable=True), wrap_lines=True, height=8), title='Console'),
-        Window(status_ctrl, height=1),
+        VSplit([
+            Window(status_left_ctrl,  height=1),
+            Window(status_right_ctrl, height=1, dont_extend_width=False),
+        ]),
     ])
 )
 
