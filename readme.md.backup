@@ -3,11 +3,37 @@
 ## how about CRISP for a name? like lisp but crisp
 ---
 
+# Links and refs
+Forth language: https://home.hccnet.nl/anij/
+
+https://www.forth.org/tutorials.html
 ## Execution Model
 
-- Grid scans **left to right**, **top to bottom**, once per tick
-- Every cell executes exactly once per tick - improve with execution on change only.
-- Writes are **collected during scan**, applied **after full scan completes**
+- Grid scans **left to right**, **top to bottom**
+- (only on bang!)Every cell executes exactly once per tick - improve with execution on change only.
+- Writes to  bottom  are executed right away.  writes
+- Writes  to right  
+	- Writes  to the right are executed on same frame, right after writer finishes,  and on bang.
+	- Operator can write to right indefinitely.
+	- Operator  can read right only from  adjacent cells.
+	
+
+```
+	execution order example
+	SET a RNDR  //  writes something random right
+	expression:
+          a : _ _ SQR _
+	execution
+          0 1 2    3     4   5
+          a : RNDR 0.345 SQR 0.11
+```
+|0. push a to stack
+|1. dereference to right - write RNDR
+|2. exec RNDR - write random value to right
+|3. push value 0.345 to stack
+|4. exec SQR, write to right.
+	      
+
 - No operator reads from below — bottom is write-only 
 
 ---
@@ -16,12 +42,15 @@
 1. **Observable Debuggability**
 	- this means that all outputs are transparent, and only references are implicit. no functions silently consumes or passes stuff around.
 	- for ex. 2 3 SUMR SET b - is invalid. SUMR will just overwrite SET kw.
+	- Even calls are explicit - via BANG (*)
 2. **Parallel spotwise-execution**.
 	- some fuunctions are processes that can start end and terminate, and execute more that once per tick. but output only at tick rate.
 	- nothing is executed without a BANG *
-3. **English letters only**. Time and again - strings are NAMES, or IDENTIFIERS not text not languages. we can have string as separate obj, but all language is ANSI charset.
-4. Nightmare of Fon Neuman - references can store functions, code can become mangled. SET a SUMR - valid.
+3. **English letters only**. Time and again - strings are NAMES, or IDENTIFIERS not text not languages. we can have string as separate obj, but all language is ANSI charset. 
+4. Nightmare of Fon Neuman - references can store functions, code can become mangled. SET a !SUMR - valid.
 5. Write once, Debug twice, read never. 
+6. Forced style - operators/methods are all CAPS or symbols. variables must start from lower case.
+
 
 
 ## Cell Types
@@ -128,14 +157,14 @@ An operator writing right AND down does both simultaneously. Bottom write is fir
        [7]       [14]         ← SUMR writes 7 right into MULR, MULR writes 7×2=14 down
 ```
 
-## types
+# types
 - Number - always signed float.
 - text  - a symbol, not a real string, used for variable names, coments, etc.
 - /var - resolves variable to a number or reference.
 	- some references can be hidden, for ex `GET x entity` - will get x value of entity.
 	- both x and entity - are hidden, but exposed as text.
 	
-### Nulls
+## Nulls
 There is no nulls. most i can think of is emitting -0 (minus zero) as replacement for a null. but no NO FUCKING NULLS AND NULL CHECKS.
 
 ## References
@@ -175,12 +204,27 @@ INC b
 b : 14 >> a 
 a : 14
 a: 14 // shorthand for value read.
-:a    // doesnt execute
-LISTR :a b
-[]: 14 b
+:a    // doesnt execute on its own, unless holds operator.
+LISTD :a b
+[] : 14 b
 
 
 
+```
+
+Saving delegates
+```
+SET abc !SQR // ! will negate execution,
+
+abc :D                 // :D dereferences down, well lol
+7   SQR  49
+
+
+SET op !:D
+
+op  :D
+abc :D
+    SQR
 ```
 
 
@@ -191,9 +235,10 @@ list variables can be formed like this:
 a b c d f LISTR []
 
 LIST a b c d f g h |
-[]
+[] >> a // great no we have recursive list :D
 
-[] UNFOLDR a b c d e f g h   // will write list to the right. can also do down
+a : a b c d f g h   // will write list to the right. can also do down
+ // note that this unfold is still valid. and a still holds the list
 ```
 
 Any operations that dont expect list will operate on first element or 0.
@@ -215,6 +260,44 @@ LEND descs LEND nums
 
 ```
 
+same sample with postfix :
+Default output is right, so output R is ommited.
+```
+77.3 water SET
+fire water erth descs SETL
+4 2 3 1 nums SETL // count differs.
+nums MINDEX 3 descs ITEM   // ITEM gets item at index: idx ITEM list
+                     -0    // because no such index
+
+descs nums #LEN [] MIND     // # is aggregator/listifier func.
+                0  3 nums SLICE [] MINDEX 1 descs ITEM   // sliced[] can be linq style 
+                                                  water : 77.3   // q. essentially wrapping
+                                                // some iterator
+
+1 2 3 4 5 6 ##ADD [] // 1+2 3+4 5+6 7+8
+1 2 3 4 5 6 #ADD [] // 0+1 1+2 // add accepts two, feeds stack into it on every item.
+1 2 5 5 5 6 7 8 LIST vals
+x y z xx yy zz LIST names
+
+DEF 2 '0 LOG _ '1 MUL >> func  
+  
+DEF // multiline sample.
+2 '0 LOG _ '1 MUL _
+$ 2 ADD _   // $ explicit read from stack. will get resutl from mul above.
+OUT func    
+    
+2 3 | 7 3 DIV _ | STK: lst SET // lst becomes list: [2 3 7/3]
+7 8 func: 21 // unwraps into: 2 8 LOG 3 7 MUL 21
+
+
+// ITERATORS
+
+API_GET_TARGETS tg SETL // gets list of entities.
+!API_GET_ENTITY_HP !MIN tg FILTAGG //return entity with lowest hp.
+
+// linq eq. Entities.Min(e=>e.hp)
+```
+
 ## Switch/case
 ```
 SET cmd lock
@@ -222,7 +305,7 @@ SET cmd lock
     *
 cmd SWITCHD
     act
-    lock * TWEEN_TO ENTITY CEIL Z someheight 2
+    lock * TWEEN_TO PROP_ENTITY_CEIL_Z someheight 2 // over 2 sec
          R * PRINT 'hey hey'
     
     nop
@@ -241,11 +324,11 @@ a0 and b0 are mulptiple params references.
 ```
               [u]
 DEF x y z [b] FNAME p q r [a]
-DEF FNAME
-	[l0] [l1] ADD
-	          * 3 [r0] MAXD
-	                   * RET d 2 // writes down 2   
-	                   R * RET r 0 // writes same to the right.
+DEF FNAME     
+    [l0] [l1] ADD
+              *   3 [r0] MAXD
+                         *    RET d   2    // writes down 2   
+                         R    *   RET r   0 // writes same to the right.
 	          
 ENDEF
 ```               
@@ -255,3 +338,27 @@ ENDEF
 - RR means it will write many potentially corrupting rest of row.
 - _D means it will output down. can take l,r,up
 - no suffix = default Orca func - read l AND r, write down.
+
+
+
+
+# Processes.
+processes have few things  to keep:  
+- they run internally, regardless of bang.
+- loop is a process. even tho it apparently executes in same frame
+
+## Loops
+
+```
+/fibonacci n
+SET a 1
+SET b 1
+LOOP 4   // whenever in same tick compiler encounters it will be in same tick.
+	SUMD a b
+	? SETTO c
+	b >> a
+	c >> b
+	c ]] res // pushes into the list implicitly. var becomes list if it isnt.
+ENDL
+RETD res
+```

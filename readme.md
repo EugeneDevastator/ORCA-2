@@ -260,6 +260,44 @@ LEND descs LEND nums
 
 ```
 
+same sample with postfix :
+Default output is right, so output R is ommited.
+```
+77.3 water SET
+fire water erth descs SETL
+4 2 3 1 nums SETL // count differs.
+nums MINDEX 3 descs ITEM   // ITEM gets item at index: idx ITEM list
+                     -0    // because no such index
+
+descs nums #LEN [] MIND     // # is aggregator/listifier func.
+                0  3 nums SLICE [] MINDEX 1 descs ITEM   // sliced[] can be linq style 
+                                                  water : 77.3   // q. essentially wrapping
+                                                // some iterator
+
+1 2 3 4 5 6 ##ADD [] // 1+2 3+4 5+6 7+8
+1 2 3 4 5 6 #ADD [] // 0+1 1+2 // add accepts two, feeds stack into it on every item.
+1 2 5 5 5 6 7 8 LIST vals
+x y z xx yy zz LIST names
+
+DEF 2 '0 LOG _ '1 MUL >> func  
+  
+DEF // multiline sample.
+2 '0 LOG _ '1 MUL _
+$ 2 ADD _   // $ explicit read from stack. will get resutl from mul above.
+OUT func    
+    
+2 3 | 7 3 DIV _ | STK: lst SET // lst becomes list: [2 3 7/3]
+7 8 func: 21 // unwraps into: 2 8 LOG 3 7 MUL 21
+
+
+// ITERATORS
+
+API_GET_TARGETS tg SETL // gets list of entities.
+!API_GET_ENTITY_HP !MIN tg FILTAGG //return entity with lowest hp.
+
+// linq eq. Entities.Min(e=>e.hp)
+```
+
 ## Switch/case
 ```
 SET cmd lock

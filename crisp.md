@@ -87,3 +87,80 @@ PSTACK[0]: _ | PSTACK[0]: 1 | 1
 ';' preserves stack
 1 2 SUM _ 3 4 ; 6 3 DIV _ ; SUM _ | 4 1 SUM 5 ; 6 3 DIV 2 ; SUM 7 ; // each time l is called min stack pointer moves. operators can read past it, but cant erase stack past last ;
 
+
+# closures
+
+1 0 1 1 OR 1 0 1 1 NOT> [wole stack] AND 
+        or consumes prev. stack
+
+4*(2+ (7/4))
+
+7 4 DIV . 2 ADD . 4 MUL
+
+7 4 DIV . 2 ADD . 4 MUL
+
+; 7 4 DIV ; 7 3 DIV ; 2 SUM
+
+stack has min range - ';' sets 
+a b c d e f g
+
+3 4 5 6 7 2 MUL 14
+stack: 3 4 5 6 14
+3 4 5 6 3 DIV
+
+b: _ c SET
+b c SET
+
+sym.
+
+b c SET
+/b c SET
+a b MUL
+/a /b c SETL
+
+/MUL c SET
+3 4 c: 12
+/SET c SET
+3 b c: // b is set to 3
+
+c: - means unpack / execute.
+/c - means use symbol.
+
+MATH operators.
+TRUTH AND FALSE: * ^
+
+implicitly unpack variables.
+a b c .. SUM 
+a b c .. PROD
+a b ADD b+a
+a b SUB a-b
+a b DIV a/b
+a b IFG 0
+a b ADDv b= a+b
+
+
+
+a b IFG
+0. 3 4 SUB
+1.
+
+LAMBDAS
+
+/0 3 /DIV myfun SETC // set closure.
+7 myfun: 7/3 
+myfunc SETC /0 /1 ADD _ /2 DIV _ SQR
+
+
+
+PROCESS HANDLES.
+deref return state: 0 = invalid/stopped. 1 = is running. 2 = is paused.
+ENT_GET_SECT: _ sec SET
+
+API_SET_CEIL_Z_AT_SEC sec _0 _ setter SET // creates lambda
+
+a SW
+open. tw: _ ; dl: _ NOT _ ; PROD _ IFT | from to time setter TWEEN _ tw SET _ 0.34 DELAY _ dly SET | tw PSTOP
+lock. islocked FLIPv
+stop. tw PSTOP
+
+
