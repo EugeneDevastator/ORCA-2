@@ -52,6 +52,7 @@ def classify_token(tok):
     if tok == 'false': return ('lit', mk_bool(False))
     if tok == '_':     return ('op', '_')
     if tok == ';':     return ('op', ';')
+    if tok == ':':     return ('op', ':')
     if re.match(r'^-?\d+$', tok):      return ('lit', mk_int(int(tok)))
     if re.match(r'^-?\d+\.\d+$', tok): return ('lit', mk_flt(float(tok)))
     if tok in OP_NAMES:                return ('op', tok)
@@ -181,10 +182,23 @@ def op_pstack(stack, env, logs, rt):
     logs.append('STACK: ' + s)
     rt.append('PSTACK')
 
+def op_deref_op(stack, env, logs, rt):
+    # : operator — pop top, resolve one level in env
+    top = stack.pop() if stack else None
+    if top is None: rt.append(':!'); return
+    if top[0] == 'sym':
+        val = env.get(top[1], top)
+        stack.append(val)
+        rt.append(':')
+    else:
+        stack.append(top)
+        rt.append(':~')  # already a value, no-op deref
+
 OP_MAP = {
     'SET': op_set, 'SETV': op_set, 'SETL': op_setl, 'SETL*': op_setl,
     'SUM': op_sum, 'SUB': op_sub, 'MUL': op_mul, 'DIV': op_div, 'MOD': op_mod,
     'INC': op_inc, 'DEC': op_dec, 'APD': op_apd, 'LOG': op_log, 'PSTACK': op_pstack,
+    ':': op_deref_op,
 }
 
 # ── Execution ─────────────────────────────────────────────────────────────────
@@ -261,7 +275,6 @@ def step_one_op(S):
         disp['stack_snap'] = list(S['stack'])
         return True
 
-    # normal token
     exec_tok(tok, S['stack'], S['env'], S['logs'], rt)
     disp['rt_parts'].extend(rt)
     S['op_idx'] += 1
@@ -297,7 +310,15 @@ def exec_tok(tok, stack, env, logs, rt):
     if handler: handler(stack, env, logs, rt); return
     rt.append(op + '?')
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# ── Scroll state ──────────────────────────────────────────────────────────────
+# hscroll offset (in chars) per panel: 0=runtime, 1=stack, 2=vars
+hscroll = [0, 0, 0]
+PANEL_W = 40  # fixed char width for runtime/stack/vars panels
+
+# ── App state ─────────────────────────────────────────────────────────────────
+state = {'S': None, 'status': 'Ready. F5=Run F6=StepLine F7=StepOp F8=Reset  Shift+Left/Right=hscroll panel'}
+
+code_buf = Buffer(name='code', multiline=True)
 FIB = """0 a SET
 1 b SET
 0 s SET
@@ -310,57 +331,49 @@ a b flist SETL
     c b SETV
 END
 s LOG
-flist LOG"""
+flist LOG
 
-state = {'S': None, 'status': 'Ready. F5=Run F6=StepLine F7=StepOp F8=Reset'}
-
-code_buf = Buffer(name='code', multiline=True)
+// : operator demo
+5 x SET
+x y SET
+x : _ LOG
+y : : _ LOG"""
 code_buf.set_document(Document(FIB))
+
+def clip_line(text, offset, width):
+    # returns string clipped to [offset : offset+width]
+    if offset >= len(text): return ''
+    return text[offset:offset+width]
 
 def get_runtime_text():
     S = state['S']
+    off = hscroll[0]
     if S is None:
         src = code_buf.text
         lines = src.split('\n')
-        return [('class:dim', '\n'.join(lines))]
+        result = []
+        for ln in lines:
+            result.append(('class:dim', clip_line(ln, off, PANEL_W*4) + '\n'))
+        return result
     result = []
     prog = S['prog']
     for i, line in enumerate(prog):
         disp = S['display'][i]
         is_cur = (i == S['pc'] and not S['done'])
-        prefix = ('class:cursor_line', '▶ ') if is_cur else ('', '  ')
         if disp['rt_parts']:
             text = ' '.join(disp['rt_parts'])
-            style = 'class:cursor_line' if is_cur else ''
-            result.append(prefix)
-            result.append((style, text + '\n'))
         elif not disp['visited']:
-            result.append(prefix)
-            for tok in line['tokens']:
-                result.append((tok_style(tok), tok_raw(tok) + ' '))
-            result.append(('', '\n'))
+            text = ' '.join(tok_raw(t) for t in line['tokens'])
         else:
-            result.append(prefix)
-            result.append(('class:dim', '\n'))
+            text = ''
+        clipped = clip_line(text, off, PANEL_W*4)
+        style = 'class:cursor_line' if is_cur else ('class:dim' if not disp['visited'] else '')
+        result.append((style, clipped + '\n'))
     return result
-
-def tok_style(tok):
-    k = tok[0]
-    if k == 'lit':     return 'class:tok_lit'
-    if k == 'sym':     return 'class:tok_sym'
-    if k == 'op':      return 'class:tok_op'
-    if k == 'deref':   return 'class:tok_deref'
-    if k == 'unknown': return 'class:tok_err'
-    return ''
-
-def tok_raw(tok):
-    k = tok[0]
-    if k == 'lit':   return val_str(tok[1])
-    if k == 'deref': return tok[1] + ':'
-    return tok[1]
 
 def get_stack_text():
     S = state['S']
+    off = hscroll[1]
     if S is None: return [('', '')]
     result = []
     prog = S['prog']
@@ -369,17 +382,18 @@ def get_stack_text():
         is_cur = (i == S['pc'] and not S['done'])
         style = 'class:cursor_line' if is_cur else ''
         snap_str = ' '.join(val_str(x) for x in disp['stack_snap'])
-        result.append((style, snap_str + '\n'))
+        result.append((style, clip_line(snap_str, off, PANEL_W*4) + '\n'))
     return result
 
 def get_vars_text():
     S = state['S']
+    off = hscroll[2]
     if S is None: return [('', '')]
     result = []
     for k, v in S['env'].items():
-        result.append(('class:var_name', k))
-        result.append(('', '='))
-        result.append(('class:var_val', val_str(v) + '\n'))
+        line = k + '=' + val_str(v)
+        clipped = clip_line(line, off, PANEL_W*4)
+        result.append(('', clipped + '\n'))
     return result
 
 def get_status_text():
@@ -390,6 +404,12 @@ stack_ctrl   = FormattedTextControl(get_stack_text,   focusable=False)
 vars_ctrl    = FormattedTextControl(get_vars_text,    focusable=False)
 status_ctrl  = FormattedTextControl(get_status_text,  focusable=False)
 
+def tok_raw(tok):
+    k = tok[0]
+    if k == 'lit':   return val_str(tok[1])
+    if k == 'deref': return tok[1] + ':'
+    return tok[1]
+
 def set_status(s):
     state['status'] = s
 
@@ -398,7 +418,7 @@ def ensure_state():
         state['S'] = make_state(code_buf.text)
 
 def do_run():
-    ensure_state()
+    state['S'] = make_state(code_buf.text)  # always reset before run
     S = state['S']
     limit = 2_000_000
     while not S['done'] and limit > 0:
@@ -425,6 +445,9 @@ def do_reset():
     state['S'] = None
     set_status('Reset.')
 
+# focused panel index for hscroll (0=runtime,1=stack,2=vars)
+focused_panel = [0]
+
 kb = KeyBindings()
 
 @kb.add('f5')
@@ -442,6 +465,33 @@ def _(event): do_reset(); event.app.invalidate()
 @kb.add('c-q')
 def _(event): event.app.exit()
 
+# Shift+Left/Right scrolls the runtime panel horizontally
+@kb.add('s-left')
+def _(event):
+    p = focused_panel[0]
+    hscroll[p] = max(0, hscroll[p] - 4)
+    event.app.invalidate()
+
+@kb.add('s-right')
+def _(event):
+    p = focused_panel[0]
+    hscroll[p] += 4
+    event.app.invalidate()
+
+# Tab cycles focused panel for hscroll target
+@kb.add('tab')
+def _(event):
+    focused_panel[0] = (focused_panel[0] + 1) % 3
+    set_status('hscroll panel: ' + ['Runtime','Stack','Vars'][focused_panel[0]] + '  Shift+Left/Right to scroll')
+    event.app.layout.focus_next()
+    event.app.invalidate()
+
+@kb.add('s-tab')
+def _(event):
+    focused_panel[0] = (focused_panel[0] - 1) % 3
+    event.app.layout.focus_previous()
+    event.app.invalidate()
+
 style = Style.from_dict({
     '':              'bg:#f8f8f8 #222222',
     'frame.border':  '#aaaaaa',
@@ -458,13 +508,18 @@ style = Style.from_dict({
     'status':        'bg:#dddddd #333333',
 })
 
+CODE_W    = 36
+RUNTIME_W = 40
+STACK_W   = 22
+VARS_W    = 22
+
 layout = Layout(
     HSplit([
         VSplit([
-            Frame(Window(BufferControl(buffer=code_buf), wrap_lines=False), title='Code'),
-            Frame(Window(runtime_ctrl, wrap_lines=False), title='Runtime'),
-            Frame(Window(stack_ctrl,   wrap_lines=False, width=20), title='Stack'),
-            Frame(Window(vars_ctrl,    wrap_lines=False, width=20), title='Vars'),
+            Frame(Window(BufferControl(buffer=code_buf), wrap_lines=False, width=CODE_W),    title='Code'),
+            Frame(Window(runtime_ctrl, wrap_lines=False, width=RUNTIME_W),                   title='Runtime'),
+            Frame(Window(stack_ctrl,   wrap_lines=False, width=STACK_W),                     title='Stack'),
+            Frame(Window(vars_ctrl,    wrap_lines=False, width=VARS_W),                      title='Vars'),
         ]),
         Window(status_ctrl, height=1),
     ])
