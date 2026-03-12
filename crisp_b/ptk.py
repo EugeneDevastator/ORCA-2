@@ -6,7 +6,8 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import Frame
+from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.layout.dimension import Dimension as D
 import re
 
 # ── Console ───────────────────────────────────────────────────────────────────
@@ -97,13 +98,11 @@ def tokenize(line):
         i = j
     return tokens
 
-# ── Tokenize a raw source line into styled spans (for code panel) ─────────────
 def highlight_source_line(raw):
     result = []
     ci = raw.find('//')
     code_part = raw[:ci] if ci >= 0 else raw
     comment_part = raw[ci:] if ci >= 0 else ''
-
     s = code_part
     i = 0
     while i < len(s):
@@ -130,7 +129,6 @@ def highlight_source_line(raw):
         elif k == 'sym':   result.append(('class:code.sym',     word))
         else:              result.append(('class:code.unknown', word))
         i = j
-
     if comment_part:
         result.append(('class:code.comment', comment_part))
     return result
@@ -395,7 +393,12 @@ def exec_tok(tok, stack, env, rt):
 hscroll = [0, 0, 0]
 state = {'S': None, 'status': 'Ready.'}
 
-HELP_TEXT = 'F5=Run  F6=StepLine  F7=StepOp  F8=Reset  Tab=panel  Shift+LR=hscroll  Ctrl+Q=quit'
+PANEL_MIN    = 6
+panel_widths = [46, 32, 12, 16]
+focused_panel = [0]
+
+PANEL_NAMES = ['Code', 'Runtime', 'Stack', 'Vars']
+HELP_TEXT   = 'F5=Run  F6=StepLine  F7=StepOp  F8=Reset  Tab=panel  Alt+/-=width  Shift+LR=hscroll  Ctrl+Q=quit'
 
 code_buf = Buffer(name='code', multiline=True)
 DEMO = """5 x SET
@@ -437,7 +440,7 @@ def clip_styled(parts, offset):
                 skipped = offset
     return result
 
-# ── Code panel ────────────────────────────────────────────────────────────────
+# ── Panel text getters ────────────────────────────────────────────────────────
 def get_code_text():
     off = hscroll[0]
     result = []
@@ -448,7 +451,6 @@ def get_code_text():
         result.append(('', '\n'))
     return result
 
-# ── Runtime panel ─────────────────────────────────────────────────────────────
 def get_runtime_text():
     S = state['S']
     off = hscroll[1]
@@ -500,21 +502,12 @@ def get_vars_text():
         result.append(('', '\n'))
     return result
 
-# ── Status bar: left=message, right=fixed help ────────────────────────────────
 def get_status_left():
-    return [('class:status.msg', ' ' + state['status'] + ' ')]
+    p = focused_panel[0]
+    return [('class:status.msg', ' ' + state['status'] + '  [' + PANEL_NAMES[p] + ':' + str(panel_widths[p]) + '] ')]
 
 def get_status_right():
     return [('class:status.help', ' ' + HELP_TEXT + ' ')]
-
-code_ctrl    = FormattedTextControl(get_code_text,    focusable=False)
-runtime_ctrl = FormattedTextControl(get_runtime_text, focusable=False)
-stack_ctrl   = FormattedTextControl(get_stack_text,   focusable=False)
-vars_ctrl    = FormattedTextControl(get_vars_text,    focusable=False)
-status_left_ctrl  = FormattedTextControl(get_status_left,  focusable=False)
-status_right_ctrl = FormattedTextControl(get_status_right, focusable=False)
-
-focused_panel = [0]
 
 def set_status(s): state['status'] = s
 
@@ -552,6 +545,62 @@ def do_reset():
     console_clear()
     set_status('Reset.')
 
+# ── Style ─────────────────────────────────────────────────────────────────────
+style = Style.from_dict({
+    '':                'bg:#f8f8f8 #222222',
+    'panel.focused':   'bg:#ffffff #000000',
+    'panel.border':    '#aaaaaa',
+    'panel.title':     '#0055cc bold',
+    'status.msg':      'bg:#dddddd #333333',
+    'status.help':     'bg:#cccccc #555555',
+    'code.lit':        '#aa6600',
+    'code.op':         '#0055cc bold',
+    'code.deref':      '#007700',
+    'code.sym':        '#222222',
+    'code.comment':    '#999999',
+    'code.unknown':    'bg:#ff4444 #ffffff',
+    'rt.val':          'bg:#ffee00 #000000',
+    'rt.op':           '#0055cc bold',
+    'rt.sym':          '#555555',
+    'rt.err':          'bg:#ff4444 #ffffff bold',
+    'vars.key':        '#007700 bold',
+})
+
+# ── Focus buffers (one per panel, for click-to-focus) ─────────────────────────
+# Each panel gets a tiny read-only Buffer so BufferControl can receive focus.
+# Mouse click on a BufferControl automatically focuses it via ptk internals.
+# We map focused buffer -> panel index via name convention.
+
+panel_bufs = [
+    Buffer(name='panel0', read_only=True),
+    Buffer(name='panel1', read_only=True),
+    Buffer(name='panel2', read_only=True),
+    Buffer(name='panel3', read_only=True),
+]
+
+# ── Title controls (pure FormattedTextControl, no mouse_handler arg) ──────────
+def make_title_ctrl(idx, name):
+    def get():
+        marker = '>' if focused_panel[0] == idx else ' '
+        st = 'class:panel.title' if focused_panel[0] == idx else 'class:panel.border'
+        return [(st, marker + name + marker)]
+    return FormattedTextControl(get, focusable=False)
+
+code_title_ctrl    = make_title_ctrl(0, 'Code')
+runtime_title_ctrl = make_title_ctrl(1, 'Runtime')
+stack_title_ctrl   = make_title_ctrl(2, 'Stack')
+vars_title_ctrl    = make_title_ctrl(3, 'Vars')
+
+# ── Content controls ──────────────────────────────────────────────────────────
+code_ctrl    = FormattedTextControl(get_code_text,    focusable=False)
+runtime_ctrl = FormattedTextControl(get_runtime_text, focusable=False)
+stack_ctrl   = FormattedTextControl(get_stack_text,   focusable=False)
+vars_ctrl    = FormattedTextControl(get_vars_text,    focusable=False)
+
+status_left_ctrl  = FormattedTextControl(get_status_left,  focusable=False)
+status_right_ctrl = FormattedTextControl(get_status_right, focusable=False)
+
+# ── Key bindings ──────────────────────────────────────────────────────────────
 kb = KeyBindings()
 
 @kb.add('f5')
@@ -571,58 +620,131 @@ def _(event): event.app.exit()
 
 @kb.add('s-left')
 def _(event):
-    hscroll[focused_panel[0]] = max(0, hscroll[focused_panel[0]] - 4)
+    p = focused_panel[0]
+    if p < 3: hscroll[p] = max(0, hscroll[p] - 4)
     event.app.invalidate()
 
 @kb.add('s-right')
 def _(event):
-    hscroll[focused_panel[0]] += 4
+    p = focused_panel[0]
+    if p < 3: hscroll[p] += 4
     event.app.invalidate()
 
 @kb.add('tab')
 def _(event):
-    focused_panel[0] = (focused_panel[0] + 1) % 3
-    set_status('hscroll panel: ' + ['Code','Runtime','Stack'][focused_panel[0]])
+    focused_panel[0] = (focused_panel[0] + 1) % 4
+    set_status('panel: ' + PANEL_NAMES[focused_panel[0]])
+    # Also move ptk focus to the matching buffer window so mouse/kb align
+    event.app.layout.focus(panel_bufs[focused_panel[0]])
     event.app.invalidate()
 
-style = Style.from_dict({
-    '':                'bg:#f8f8f8 #222222',
-    'frame.border':    '#aaaaaa',
-    'frame.label':     '#0055cc bold',
-    'status.msg':      'bg:#dddddd #333333',
-    'status.help':     'bg:#cccccc #555555',
-    # code panel
-    'code.lit':        '#aa6600',
-    'code.op':         '#0055cc bold',
-    'code.deref':      '#007700',
-    'code.sym':        '#222222',
-    'code.comment':    '#999999',
-    'code.unknown':    'bg:#ff4444 #ffffff',
-    # runtime panel
-    'rt.val':          'bg:#ffee00 #000000',
-    'rt.op':           '#0055cc bold',
-    'rt.sym':          '#555555',
-    'rt.err':          'bg:#ff4444 #ffffff bold',
-    # vars panel
-    'vars.key':        '#007700 bold',
-})
+# Alt+= and Alt+- for width adjustment
+# 'escape','=' is how ptk sees Alt+= in many terminals
+@kb.add('escape', '=')
+def _(event):
+    p = focused_panel[0]
+    panel_widths[p] += 2
+    set_status(PANEL_NAMES[p] + ' w=' + str(panel_widths[p]))
+    event.app.invalidate()
+
+@kb.add('escape', '-')
+def _(event):
+    p = focused_panel[0]
+    panel_widths[p] = max(PANEL_MIN, panel_widths[p] - 2)
+    set_status(PANEL_NAMES[p] + ' w=' + str(panel_widths[p]))
+    event.app.invalidate()
+
+# ── Click-to-focus via key bindings on BufferControl focus events ─────────────
+# ptk fires focus events when a BufferControl gains focus via mouse click.
+# We hook into this by watching which buffer is focused after each event.
+# Simplest: override the app's on_invalidate or use a filter.
+# Actually cleanest: use a custom mouse handler on each panel's overlay Window.
+#
+# The stable ptk way to get mouse-click-to-focus:
+# Make each panel's content window use a BufferControl (focusable=True).
+# When clicked, ptk focuses that buffer. We then sync focused_panel from it.
+#
+# We wrap this in a post-render hook via app.after_render.
+
+def sync_focus(app):
+    """Called after each render. Sync focused_panel from ptk's focused buffer."""
+    try:
+        current = app.layout.current_buffer
+        if current is not None:
+            name = current.name
+            for i, buf in enumerate(panel_bufs):
+                if buf.name == name:
+                    if focused_panel[0] != i:
+                        focused_panel[0] = i
+                        set_status('panel: ' + PANEL_NAMES[i])
+                    break
+    except Exception:
+        pass
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+# Each panel: title (FormattedTextControl) + content (FormattedTextControl)
+# + a zero-height focusable BufferControl that catches mouse clicks.
+# The BufferControl sits behind via a Window with height=0... 
+# Actually simpler: make the content Window use the panel_buf as an overlay.
+#
+# Simplest stable approach:
+# Each panel column = HSplit of [title_window, content_window, focus_window]
+# focus_window has height=1 at bottom, uses BufferControl(panel_buf).
+# User clicks anywhere → ptk routes to nearest focusable → focus_window.
+# But that only works if focus_window is the only focusable in the column.
+#
+# Even simpler: just one focusable Window per panel that fills the whole panel.
+# We use a transparent overlay trick: HSplit with the focusable buf at height=1
+# and content above. Click on title or content won't reach the buf.
+#
+# ACTUAL simplest: put BufferControl as the content, render our text via
+# get_line_prefix or just accept that clicking the bottom 1 row focuses.
+# For a dev tool this is fine.
+#
+# Let's do: title(1) + content(fill) + focus_strip(1 row, BufferControl).
+# Clicking the focus strip focuses the panel. Tab also works.
+
+def pw(i):
+    return D(preferred=panel_widths[i], min=PANEL_MIN)
+
+def make_col(title_ctrl, content_ctrl, buf, idx):
+    return HSplit([
+        Window(title_ctrl,   height=1),
+        Window(content_ctrl, wrap_lines=False),
+        Window(BufferControl(buffer=buf, focusable=True), height=1),
+    ], width=lambda i=idx: pw(i))
+
+col0 = make_col(code_title_ctrl,    code_ctrl,    panel_bufs[0], 0)
+col1 = make_col(runtime_title_ctrl, runtime_ctrl, panel_bufs[1], 1)
+col2 = make_col(stack_title_ctrl,   stack_ctrl,   panel_bufs[2], 2)
+col3 = HSplit([
+    Window(vars_title_ctrl,  height=1),
+    Window(vars_ctrl,        wrap_lines=False),
+    Window(BufferControl(buffer=panel_bufs[3], focusable=True), height=1),
+])  # no width= → takes remainder
 
 layout = Layout(
     HSplit([
-        VSplit([
-            Frame(Window(code_ctrl,    wrap_lines=False, width=46), title='Code'),
-            Frame(Window(runtime_ctrl, wrap_lines=False, width=32), title='Runtime'),
-            Frame(Window(stack_ctrl,   wrap_lines=False, width=12), title='Stack'),
-            Frame(Window(vars_ctrl,    wrap_lines=False, width=16), title='Vars'),
+        VSplit([col0, col1, col2, col3]),
+        HSplit([
+            Window(FormattedTextControl(
+                lambda: [('class:panel.title', ' Console')],
+                focusable=False),
+                height=1),
+            Window(BufferControl(buffer=console_buf, focusable=True),
+                   wrap_lines=True, height=8),
         ]),
-        Frame(Window(BufferControl(buffer=console_buf, focusable=True), wrap_lines=True, height=8), title='Console'),
         VSplit([
             Window(status_left_ctrl,  height=1),
-            Window(status_right_ctrl, height=1, dont_extend_width=False),
+            Window(status_right_ctrl, height=1),
         ]),
-    ])
+    ]),
+    focused_element=panel_bufs[0],
 )
 
 app = Application(layout=layout, key_bindings=kb, style=style,
-                  full_screen=True, mouse_support=False)
+                  full_screen=True, mouse_support=True)
+
+app.after_render += sync_focus
+
 app.run()
