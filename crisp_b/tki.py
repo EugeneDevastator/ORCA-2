@@ -22,7 +22,7 @@ OP_NAMES = {'SET','SETV','SETL','SETL*','SUM','SUB','MUL','DIV','MOD',
             'INC','DEC','APD','LOG','PSTACK','FOR','END'}
 
 DEMO = """5 x SET
-x y SETV
+x y SET
 x: LOG
 y: LOG
 
@@ -35,8 +35,8 @@ a: b: flist SETL
     a: b: SUM _ c SET
     c: flist APD
     c: s: SUM _ s SET
-    b a SETV
-    c b SETV
+    b: a SET
+    c: b SET
 END
 s: LOG
 flist: LOG"""
@@ -131,6 +131,12 @@ def val_str(x):
     if t == 'bool': return 'true' if v else 'false'
     return str(v)
 
+# ONE level of env lookup only — no chain following
+def resolve(x, env):
+    if x is not None and x[0] == 'sym':
+        return env.get(x[1], x)
+    return x
+
 def to_num(x):
     if x is None: return 0
     t, v = x
@@ -139,72 +145,60 @@ def to_num(x):
     try: return float(v)
     except: return 0
 
-def full_deref(x, env):
-    seen = set()
-    while x is not None and x[0] == 'sym':
-        name = x[1]
-        if name in seen: break
-        seen.add(name)
-        nxt = env.get(name)
-        if nxt is None: break
-        x = nxt
-    return x
-
-# Always returns a value — ZERO if stack empty. Caller's problem if data is wrong.
-def popd(stack, env):
-    return full_deref(stack.pop() if stack else ZERO, env)
-
 def pops(stack):
     return stack.pop() if stack else ZERO
-
-# Ops no longer check for None — bad data yields zero-based results.
 
 def op_set(stack, env, rt):
     nm  = pops(stack)
     val = pops(stack)
-    env[nm[1]] = val; stack.append(nm); rt.append(('op','SET'))
-
-def op_setv(stack, env, rt):
-    nm  = pops(stack)
-    val = pops(stack)
-    env[nm[1]] = full_deref(val, env); stack.append(nm); rt.append(('op','SETV'))
+    env[nm[1]] = val
+    stack.append(nm)
+    rt.append(('op', 'SET'))
 
 def op_setl(stack, env, rt):
     nm = pops(stack)
-    env[nm[1]] = mk_list(list(stack)); stack.clear(); stack.append(nm); rt.append(('op','SETL'))
+    env[nm[1]] = mk_list(list(stack))
+    stack.clear()
+    stack.append(nm)
+    rt.append(('op', 'SETL'))
 
 def op_sum(stack, env, rt):
-    b = popd(stack, env); a = popd(stack, env)
-    res = mk_num(to_num(a) + to_num(b)); stack.append(res); rt.append(('val', val_str(res)))
+    b = pops(stack); a = pops(stack)
+    res = mk_num(to_num(a) + to_num(b))
+    stack.append(res); rt.append(('val', val_str(res)))
 
 def op_sub(stack, env, rt):
-    b = popd(stack, env); a = popd(stack, env)
-    res = mk_num(to_num(a) - to_num(b)); stack.append(res); rt.append(('val', val_str(res)))
+    b = pops(stack); a = pops(stack)
+    res = mk_num(to_num(a) - to_num(b))
+    stack.append(res); rt.append(('val', val_str(res)))
 
 def op_mul(stack, env, rt):
-    b = popd(stack, env); a = popd(stack, env)
-    res = mk_num(to_num(a) * to_num(b)); stack.append(res); rt.append(('val', val_str(res)))
+    b = pops(stack); a = pops(stack)
+    res = mk_num(to_num(a) * to_num(b))
+    stack.append(res); rt.append(('val', val_str(res)))
 
 def op_div(stack, env, rt):
-    b = popd(stack, env); a = popd(stack, env)
+    b = pops(stack); a = pops(stack)
     bv = to_num(b)
     res = mk_num(to_num(a) / bv) if bv != 0 else mk_flt(-0.0)
     stack.append(res); rt.append(('val', val_str(res)))
 
 def op_mod(stack, env, rt):
-    b = popd(stack, env); a = popd(stack, env)
+    b = pops(stack); a = pops(stack)
     bv = int(to_num(b))
     res = mk_int(int(to_num(a)) % bv) if bv != 0 else mk_int(0)
     stack.append(res); rt.append(('val', val_str(res)))
 
 def op_inc(stack, env, rt):
     nm = pops(stack)
-    env[nm[1]] = mk_num(to_num(env.get(nm[1], ZERO)) + 1)
+    cur = resolve(env.get(nm[1], ZERO), env)
+    env[nm[1]] = mk_num(to_num(cur) + 1)
     stack.append(env[nm[1]]); rt.append(('op', 'INC'))
 
 def op_dec(stack, env, rt):
     nm = pops(stack)
-    env[nm[1]] = mk_num(to_num(env.get(nm[1], ZERO)) - 1)
+    cur = resolve(env.get(nm[1], ZERO), env)
+    env[nm[1]] = mk_num(to_num(cur) - 1)
     stack.append(env[nm[1]]); rt.append(('op', 'DEC'))
 
 def op_apd(stack, env, rt):
@@ -212,18 +206,20 @@ def op_apd(stack, env, rt):
     val     = pops(stack)
     if list_nm[1] not in env or env[list_nm[1]][0] != 'list':
         env[list_nm[1]] = mk_list([])
-    env[list_nm[1]][1].append(val); stack.append(list_nm); rt.append(('op', 'APD'))
+    env[list_nm[1]][1].append(val)
+    stack.append(list_nm); rt.append(('op', 'APD'))
 
 def op_log(stack, env, rt, console_cb):
     val = pops(stack)
-    console_cb(val_str(full_deref(val, env))); rt.append(('op', 'LOG'))
+    console_cb(val_str(val)); rt.append(('op', 'LOG'))
 
 def op_pstack(stack, env, rt, console_cb):
-    console_cb('STACK: ' + ' '.join(val_str(x) for x in stack)); rt.append(('op', 'PSTACK'))
+    console_cb('STACK: ' + ' '.join(val_str(x) for x in stack))
+    rt.append(('op', 'PSTACK'))
 
 def op_deref_op(stack, env, rt):
     top = pops(stack)
-    val = full_deref(top, env) if top[0] == 'sym' else top
+    val = resolve(top, env)
     stack.append(val); rt.append(('val', val_str(val)))
 
 def op_underscore(stack, env, rt):
@@ -237,12 +233,12 @@ def exec_tok(tok, stack, env, rt, console_cb):
     if kind == 'sym':
         stack.append(mk_sym(tok[1])); rt.append(('sym', tok[1])); return
     if kind == 'deref':
-        val = full_deref(mk_sym(tok[1]), env)
+        val = resolve(mk_sym(tok[1]), env)
         stack.append(val); rt.append(('val', val_str(val))); return
     if kind == 'unknown':
         rt.append(('err', tok[1] + '?')); return
     op_map = {
-        'SET':op_set,'SETV':op_setv,'SETL':op_setl,'SETL*':op_setl,
+        'SET':op_set,'SETL':op_setl,'SETL*':op_setl,
         'SUM':op_sum,'SUB':op_sub,'MUL':op_mul,'DIV':op_div,'MOD':op_mod,
         'INC':op_inc,'DEC':op_dec,'APD':op_apd,
         ':':op_deref_op,'_':op_underscore,
@@ -298,10 +294,13 @@ def step_one_op(S, console_cb):
     tok = line['tokens'][S['op_idx']]; rt = []; jumped = False
 
     if tok == ('op','FOR'):
-        var_tok = pops(S['stack'])
-        step_v  = to_num(popd(S['stack'], S['env']))
-        to_v    = to_num(popd(S['stack'], S['env']))
-        from_v  = to_num(popd(S['stack'], S['env']))
+        var_tok  = pops(S['stack'])
+        step_raw = pops(S['stack'])
+        to_raw   = pops(S['stack'])
+        from_raw = pops(S['stack'])
+        step_v = to_num(step_raw)
+        to_v   = to_num(to_raw)
+        from_v = to_num(from_raw)
         S['env'][var_tok[1]] = mk_num(from_v)
         S['loop_stack'].append({'var':var_tok[1],'to':to_v,'step':step_v,
                                 'for_pc':S['pc'],'end_pc':line['end_pc']})
@@ -317,7 +316,7 @@ def step_one_op(S, console_cb):
             rt.append(('err','END!')); disp['rt_parts'].extend(rt)
             S['op_idx'] += 1; disp['stack_snap'] = list(S['stack']); return True
         loop = S['loop_stack'][-1]
-        cur  = to_num(S['env'].get(loop['var'], ZERO)) + loop['step']
+        cur  = to_num(resolve(S['env'].get(loop['var'], ZERO), S['env'])) + loop['step']
         S['env'][loop['var']] = mk_num(cur)
         cont = (cur <= loop['to']) if loop['step'] > 0 else (cur >= loop['to'])
         if cont: S['pc'] = loop['for_pc'] + 1; S['op_idx'] = 0; S['stack'] = []
