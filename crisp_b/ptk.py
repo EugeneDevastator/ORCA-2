@@ -6,8 +6,8 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
-from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.layout.dimension import Dimension as D
+from prompt_toolkit.lexers import Lexer
 import re
 
 # ── Console ───────────────────────────────────────────────────────────────────
@@ -98,10 +98,12 @@ def tokenize(line):
         i = j
     return tokens
 
-def highlight_source_line(raw):
+# ── Syntax Lexer (plugs into BufferControl) ───────────────────────────────────
+def lex_raw_line(raw):
+    """Returns list of (style_str, text) for one raw source line."""
     result = []
     ci = raw.find('//')
-    code_part = raw[:ci] if ci >= 0 else raw
+    code_part   = raw[:ci] if ci >= 0 else raw
     comment_part = raw[ci:] if ci >= 0 else ''
     s = code_part
     i = 0
@@ -132,6 +134,16 @@ def highlight_source_line(raw):
     if comment_part:
         result.append(('class:code.comment', comment_part))
     return result
+
+class StackLexer(Lexer):
+    """prompt_toolkit Lexer — lex_document returns a callable(lineno) -> tokens."""
+    def lex_document(self, document):
+        lines = document.lines
+        def get_line(lineno):
+            if lineno >= len(lines):
+                return []
+            return lex_raw_line(lines[lineno])
+        return get_line
 
 # ── Parser ────────────────────────────────────────────────────────────────────
 def parse_program(src):
@@ -390,17 +402,13 @@ def exec_tok(tok, stack, env, rt):
     rt.append(rt_err(op + '?'))
 
 # ── UI state ──────────────────────────────────────────────────────────────────
-hscroll = [0, 0, 0]
 state = {'S': None, 'status': 'Ready.'}
-
-PANEL_MIN    = 6
-panel_widths = [46, 32, 12, 16]
 focused_panel = [0]
+panel_widths  = [46, 32, 12, 16]
+PANEL_MIN     = 6
+PANEL_NAMES   = ['Code', 'Runtime', 'Stack', 'Vars']
+HELP_TEXT     = 'F5=Run  F6=StepLine  F7=StepOp  F8=Reset  Tab=panel  Alt+/-=width  Ctrl+Q=quit'
 
-PANEL_NAMES = ['Code', 'Runtime', 'Stack', 'Vars']
-HELP_TEXT   = 'F5=Run  F6=StepLine  F7=StepOp  F8=Reset  Tab=panel  Alt+/-=width  Shift+LR=hscroll  Ctrl+Q=quit'
-
-code_buf = Buffer(name='code', multiline=True)
 DEMO = """5 x SET
 x y SETV
 x: LOG
@@ -420,54 +428,26 @@ a: b: flist SETL
 END
 s: LOG
 flist: LOG"""
+
+code_buf = Buffer(name='code', multiline=True)
 code_buf.set_document(Document(DEMO))
 
-# ── clip_styled ───────────────────────────────────────────────────────────────
-def clip_styled(parts, offset):
-    if offset == 0:
-        return list(parts)
-    result = []
-    skipped = 0
-    for style, text in parts:
-        if skipped >= offset:
-            result.append((style, text))
-        else:
-            remaining = offset - skipped
-            if remaining >= len(text):
-                skipped += len(text)
-            else:
-                result.append((style, text[remaining:]))
-                skipped = offset
-    return result
-
 # ── Panel text getters ────────────────────────────────────────────────────────
-def get_code_text():
-    off = hscroll[0]
-    result = []
-    for raw in code_buf.text.split('\n'):
-        spans = highlight_source_line(raw)
-        clipped = clip_styled(spans, off)
-        result.extend(clipped)
-        result.append(('', '\n'))
-    return result
-
 def get_runtime_text():
     S = state['S']
-    off = hscroll[1]
     result = []
+    src_lines = code_buf.text.split('\n')
     if S is None:
-        for raw in code_buf.text.split('\n'):
-            spans = highlight_source_line(raw)
-            clipped = clip_styled(spans, off)
-            result.extend(clipped)
+        for raw in src_lines:
+            result.extend(lex_raw_line(raw))
             result.append(('', '\n'))
     else:
         for i, line in enumerate(S['prog']):
             disp = S['display'][i]
             if disp['rt_parts']:
-                parts = disp['rt_parts']
+                parts = list(disp['rt_parts'])
             elif not disp['visited']:
-                parts = highlight_source_line(line['raw'])
+                parts = lex_raw_line(line['raw'])
             else:
                 parts = []
             spaced = []
@@ -475,20 +455,17 @@ def get_runtime_text():
                 spaced.append(p)
                 if idx < len(parts) - 1:
                     spaced.append(('', ' '))
-            clipped = clip_styled(spaced, off)
-            result.extend(clipped)
+            result.extend(spaced)
             result.append(('', '\n'))
     return result
 
 def get_stack_text():
     S = state['S']
-    off = hscroll[2]
     if S is None: return [('', '')]
     result = []
     for i in range(len(S['prog'])):
         snap_str = ' '.join(val_str(x) for x in S['display'][i]['stack_snap'])
-        clipped = snap_str[off:] if off < len(snap_str) else ''
-        result.append(('', clipped + '\n'))
+        result.append(('', snap_str + '\n'))
     return result
 
 def get_vars_text():
@@ -502,15 +479,14 @@ def get_vars_text():
         result.append(('', '\n'))
     return result
 
-def get_status_left():
+def get_status_text():
     p = focused_panel[0]
-    return [('class:status.msg', ' ' + state['status'] + '  [' + PANEL_NAMES[p] + ':' + str(panel_widths[p]) + '] ')]
-
-def get_status_right():
-    return [('class:status.help', ' ' + HELP_TEXT + ' ')]
+    msg  = ' ' + state['status'] + '  [' + PANEL_NAMES[p] + ':' + str(panel_widths[p]) + ']'
+    return [('class:status.msg', msg), ('class:status.help', '  ' + HELP_TEXT + ' ')]
 
 def set_status(s): state['status'] = s
 
+# ── Execution helpers ─────────────────────────────────────────────────────────
 def ensure_state():
     if state['S'] is None:
         state['S'] = make_state(code_buf.text)
@@ -547,204 +523,145 @@ def do_reset():
 
 # ── Style ─────────────────────────────────────────────────────────────────────
 style = Style.from_dict({
-    '':                'bg:#f8f8f8 #222222',
-    'panel.focused':   'bg:#ffffff #000000',
-    'panel.border':    '#aaaaaa',
-    'panel.title':     '#0055cc bold',
-    'status.msg':      'bg:#dddddd #333333',
-    'status.help':     'bg:#cccccc #555555',
-    'code.lit':        '#aa6600',
-    'code.op':         '#0055cc bold',
-    'code.deref':      '#007700',
-    'code.sym':        '#222222',
-    'code.comment':    '#999999',
-    'code.unknown':    'bg:#ff4444 #ffffff',
-    'rt.val':          'bg:#ffee00 #000000',
-    'rt.op':           '#0055cc bold',
-    'rt.sym':          '#555555',
-    'rt.err':          'bg:#ff4444 #ffffff bold',
-    'vars.key':        '#007700 bold',
+    '':               'bg:#f8f8f8 #222222',
+    'code.lit':       '#aa6600',
+    'code.op':        '#0055cc bold',
+    'code.deref':     '#007700',
+    'code.sym':       '#222222',
+    'code.comment':   '#999999 italic',
+    'code.unknown':   'bg:#ff4444 #ffffff',
+    'rt.val':         'bg:#ffee00 #000000',
+    'rt.op':          '#0055cc bold',
+    'rt.sym':         '#555555',
+    'rt.err':         'bg:#ff4444 #ffffff bold',
+    'vars.key':       '#007700 bold',
+    'panel.title':    '#0055cc bold',
+    'panel.title.focused': 'bg:#0055cc #ffffff bold',
+    'status.msg':     'bg:#dddddd #333333',
+    'status.help':    'bg:#cccccc #555555',
 })
 
-# ── Focus buffers (one per panel, for click-to-focus) ─────────────────────────
-# Each panel gets a tiny read-only Buffer so BufferControl can receive focus.
-# Mouse click on a BufferControl automatically focuses it via ptk internals.
-# We map focused buffer -> panel index via name convention.
+# ── Buffers for read-only panels (needed for mouse focus) ─────────────────────
+runtime_buf = Buffer(name='runtime', read_only=True)
+stack_buf   = Buffer(name='stack',   read_only=True)
+vars_buf    = Buffer(name='vars',    read_only=True)
+console_buf_ro = console_buf  # already defined above
 
-panel_bufs = [
-    Buffer(name='panel0', read_only=True),
-    Buffer(name='panel1', read_only=True),
-    Buffer(name='panel2', read_only=True),
-    Buffer(name='panel3', read_only=True),
-]
+_PANEL_BUFS = [code_buf, runtime_buf, stack_buf, vars_buf]
+_BUF_TO_IDX = {'code': 0, 'runtime': 1, 'stack': 2, 'vars': 3}
 
-# ── Title controls (pure FormattedTextControl, no mouse_handler arg) ──────────
-def make_title_ctrl(idx, name):
+# ── Title helper ──────────────────────────────────────────────────────────────
+def make_title(idx, name):
     def get():
-        marker = '>' if focused_panel[0] == idx else ' '
-        st = 'class:panel.title' if focused_panel[0] == idx else 'class:panel.border'
+        focused = focused_panel[0] == idx
+        st = 'class:panel.title.focused' if focused else 'class:panel.title'
+        marker = '>' if focused else ' '
         return [(st, marker + name + marker)]
     return FormattedTextControl(get, focusable=False)
 
-code_title_ctrl    = make_title_ctrl(0, 'Code')
-runtime_title_ctrl = make_title_ctrl(1, 'Runtime')
-stack_title_ctrl   = make_title_ctrl(2, 'Stack')
-vars_title_ctrl    = make_title_ctrl(3, 'Vars')
+# ── Layout ────────────────────────────────────────────────────────────────────
+def pw(i): return D(preferred=panel_widths[i], min=PANEL_MIN)
 
-# ── Content controls ──────────────────────────────────────────────────────────
-code_ctrl    = FormattedTextControl(get_code_text,    focusable=False)
-runtime_ctrl = FormattedTextControl(get_runtime_text, focusable=False)
-stack_ctrl   = FormattedTextControl(get_stack_text,   focusable=False)
-vars_ctrl    = FormattedTextControl(get_vars_text,    focusable=False)
+# Code: BufferControl with our custom Lexer — editing + highlighting in one.
+col0 = HSplit([
+    Window(make_title(0, 'Code'), height=1),
+    Window(
+        BufferControl(buffer=code_buf, lexer=StackLexer(), focusable=True),
+        wrap_lines=False,
+    ),
+], width=lambda: pw(0))
 
-status_left_ctrl  = FormattedTextControl(get_status_left,  focusable=False)
-status_right_ctrl = FormattedTextControl(get_status_right, focusable=False)
+# Runtime: FormattedTextControl (read-only display) + thin focusable strip.
+col1 = HSplit([
+    Window(make_title(1, 'Runtime'), height=1),
+    Window(FormattedTextControl(get_runtime_text, focusable=False), wrap_lines=False),
+    Window(BufferControl(buffer=runtime_buf, focusable=True), height=1),
+], width=lambda: pw(1))
+
+# Stack
+col2 = HSplit([
+    Window(make_title(2, 'Stack'), height=1),
+    Window(FormattedTextControl(get_stack_text, focusable=False), wrap_lines=False),
+    Window(BufferControl(buffer=stack_buf, focusable=True), height=1),
+], width=lambda: pw(2))
+
+# Vars
+col3 = HSplit([
+    Window(make_title(3, 'Vars'), height=1),
+    Window(FormattedTextControl(get_vars_text, focusable=False), wrap_lines=False),
+    Window(BufferControl(buffer=vars_buf, focusable=True), height=1),
+])
+
+layout = Layout(
+    HSplit([
+        VSplit([col0, col1, col2, col3]),
+        Window(FormattedTextControl(
+            lambda: [('class:panel.title', ' Console')], focusable=False), height=1),
+        Window(BufferControl(buffer=console_buf, focusable=False),
+               wrap_lines=True, height=8),
+        Window(FormattedTextControl(get_status_text, focusable=False), height=1),
+    ]),
+    focused_element=code_buf,
+)
 
 # ── Key bindings ──────────────────────────────────────────────────────────────
 kb = KeyBindings()
 
 @kb.add('f5')
-def _(event): do_run(); event.app.invalidate()
+def _(e): do_run(); e.app.invalidate()
 
 @kb.add('f6')
-def _(event): do_step_line(); event.app.invalidate()
+def _(e): do_step_line(); e.app.invalidate()
 
 @kb.add('f7')
-def _(event): do_step_op(); event.app.invalidate()
+def _(e): do_step_op(); e.app.invalidate()
 
 @kb.add('f8')
-def _(event): do_reset(); event.app.invalidate()
+def _(e): do_reset(); e.app.invalidate()
 
 @kb.add('c-q')
-def _(event): event.app.exit()
-
-@kb.add('s-left')
-def _(event):
-    p = focused_panel[0]
-    if p < 3: hscroll[p] = max(0, hscroll[p] - 4)
-    event.app.invalidate()
-
-@kb.add('s-right')
-def _(event):
-    p = focused_panel[0]
-    if p < 3: hscroll[p] += 4
-    event.app.invalidate()
+def _(e): e.app.exit()
 
 @kb.add('tab')
-def _(event):
+def _(e):
     focused_panel[0] = (focused_panel[0] + 1) % 4
+    e.app.layout.focus(_PANEL_BUFS[focused_panel[0]])
     set_status('panel: ' + PANEL_NAMES[focused_panel[0]])
-    # Also move ptk focus to the matching buffer window so mouse/kb align
-    event.app.layout.focus(panel_bufs[focused_panel[0]])
-    event.app.invalidate()
+    e.app.invalidate()
 
-# Alt+= and Alt+- for width adjustment
-# 'escape','=' is how ptk sees Alt+= in many terminals
 @kb.add('escape', '=')
-def _(event):
+def _(e):
     p = focused_panel[0]
     panel_widths[p] += 2
     set_status(PANEL_NAMES[p] + ' w=' + str(panel_widths[p]))
-    event.app.invalidate()
+    e.app.invalidate()
 
 @kb.add('escape', '-')
-def _(event):
+def _(e):
     p = focused_panel[0]
     panel_widths[p] = max(PANEL_MIN, panel_widths[p] - 2)
     set_status(PANEL_NAMES[p] + ' w=' + str(panel_widths[p]))
-    event.app.invalidate()
+    e.app.invalidate()
 
-# ── Click-to-focus via key bindings on BufferControl focus events ─────────────
-# ptk fires focus events when a BufferControl gains focus via mouse click.
-# We hook into this by watching which buffer is focused after each event.
-# Simplest: override the app's on_invalidate or use a filter.
-# Actually cleanest: use a custom mouse handler on each panel's overlay Window.
-#
-# The stable ptk way to get mouse-click-to-focus:
-# Make each panel's content window use a BufferControl (focusable=True).
-# When clicked, ptk focuses that buffer. We then sync focused_panel from it.
-#
-# We wrap this in a post-render hook via app.after_render.
-
+# ── Focus sync (mouse clicks update focused_panel) ────────────────────────────
 def sync_focus(app):
-    """Called after each render. Sync focused_panel from ptk's focused buffer."""
     try:
-        current = app.layout.current_buffer
-        if current is not None:
-            name = current.name
-            for i, buf in enumerate(panel_bufs):
-                if buf.name == name:
-                    if focused_panel[0] != i:
-                        focused_panel[0] = i
-                        set_status('panel: ' + PANEL_NAMES[i])
-                    break
+        buf = app.layout.current_buffer
+        if buf is not None:
+            idx = _BUF_TO_IDX.get(buf.name)
+            if idx is not None and focused_panel[0] != idx:
+                focused_panel[0] = idx
+                set_status('panel: ' + PANEL_NAMES[idx])
     except Exception:
         pass
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-# Each panel: title (FormattedTextControl) + content (FormattedTextControl)
-# + a zero-height focusable BufferControl that catches mouse clicks.
-# The BufferControl sits behind via a Window with height=0... 
-# Actually simpler: make the content Window use the panel_buf as an overlay.
-#
-# Simplest stable approach:
-# Each panel column = HSplit of [title_window, content_window, focus_window]
-# focus_window has height=1 at bottom, uses BufferControl(panel_buf).
-# User clicks anywhere → ptk routes to nearest focusable → focus_window.
-# But that only works if focus_window is the only focusable in the column.
-#
-# Even simpler: just one focusable Window per panel that fills the whole panel.
-# We use a transparent overlay trick: HSplit with the focusable buf at height=1
-# and content above. Click on title or content won't reach the buf.
-#
-# ACTUAL simplest: put BufferControl as the content, render our text via
-# get_line_prefix or just accept that clicking the bottom 1 row focuses.
-# For a dev tool this is fine.
-#
-# Let's do: title(1) + content(fill) + focus_strip(1 row, BufferControl).
-# Clicking the focus strip focuses the panel. Tab also works.
-
-def pw(i):
-    return D(preferred=panel_widths[i], min=PANEL_MIN)
-
-def make_col(title_ctrl, content_ctrl, buf, idx):
-    return HSplit([
-        Window(title_ctrl,   height=1),
-        Window(content_ctrl, wrap_lines=False),
-        Window(BufferControl(buffer=buf, focusable=True), height=1),
-    ], width=lambda i=idx: pw(i))
-
-col0 = make_col(code_title_ctrl,    code_ctrl,    panel_bufs[0], 0)
-col1 = make_col(runtime_title_ctrl, runtime_ctrl, panel_bufs[1], 1)
-col2 = make_col(stack_title_ctrl,   stack_ctrl,   panel_bufs[2], 2)
-col3 = HSplit([
-    Window(vars_title_ctrl,  height=1),
-    Window(vars_ctrl,        wrap_lines=False),
-    Window(BufferControl(buffer=panel_bufs[3], focusable=True), height=1),
-])  # no width= → takes remainder
-
-layout = Layout(
-    HSplit([
-        VSplit([col0, col1, col2, col3]),
-        HSplit([
-            Window(FormattedTextControl(
-                lambda: [('class:panel.title', ' Console')],
-                focusable=False),
-                height=1),
-            Window(BufferControl(buffer=console_buf, focusable=True),
-                   wrap_lines=True, height=8),
-        ]),
-        VSplit([
-            Window(status_left_ctrl,  height=1),
-            Window(status_right_ctrl, height=1),
-        ]),
-    ]),
-    focused_element=panel_bufs[0],
+# ── Run ───────────────────────────────────────────────────────────────────────
+app = Application(
+    layout=layout,
+    key_bindings=kb,
+    style=style,
+    full_screen=True,
+    mouse_support=True,
 )
-
-app = Application(layout=layout, key_bindings=kb, style=style,
-                  full_screen=True, mouse_support=True)
-
 app.after_render += sync_focus
-
 app.run()
