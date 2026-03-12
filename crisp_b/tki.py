@@ -1,10 +1,23 @@
 import tkinter as tk
 from tkinter import font as tkfont
 import re
+import ctypes
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-FONT_NAME = "Courier New"
-FONT_SIZE = 11
+# Must be before Tk() — prevents Windows DPI bitmap scaling blur
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+# Sharpest options:
+# "Fixedsys" size 9  — bitmap, zero AA, only works at 9
+# "Consolas"  size 10 — ClearType hinted, very clean
+# "Lucida Console" size 10 — strong hinting
+FONT_NAME = "Consolas"
+FONT_SIZE = 16
 PAD = 4
 PANEL_WIDTHS = [46, 32, 12, 16]
 PANEL_NAMES  = ["Code", "Runtime", "Stack", "Vars"]
@@ -33,7 +46,6 @@ END
 s: LOG
 flist: LOG"""
 
-# ── Colors ────────────────────────────────────────────────────────────────────
 BG             = "#f8f8f8"
 FG             = "#222222"
 BG_PANEL       = "#ffffff"
@@ -53,7 +65,6 @@ COL_RT_VAL_BG  = "#ffee00"
 COL_RT_ERR_BG  = "#ff4444"
 COL_VAR_KEY    = "#007700"
 
-# ── Tokenizer ─────────────────────────────────────────────────────────────────
 def classify_token(tok):
     if tok == 'true':  return ('lit',   ('bool', True))
     if tok == 'false': return ('lit',   ('bool', False))
@@ -64,7 +75,6 @@ def classify_token(tok):
     if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*:$', tok): return ('deref', tok[:-1])
     if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', tok):  return ('sym',   tok)
     return ('unknown', tok)
-
 def tokenize_line(line):
     s = line.split('//')[0]
     tokens = []
@@ -106,7 +116,6 @@ def token_spans_in_line(line):
         spans.append((ci, len(line), 'comment'))
     return spans
 
-# ── Value helpers ─────────────────────────────────────────────────────────────
 def mk_int(v):  return ('int',  int(v))
 def mk_flt(v):  return ('flt',  float(v))
 def mk_str(v):  return ('str',  str(v))
@@ -147,7 +156,6 @@ def popd(stack, env):
     x = stack.pop() if stack else None
     return full_deref(x, env)
 
-# ── Ops ───────────────────────────────────────────────────────────────────────
 def op_set(stack, env, rt):
     nm = stack.pop() if stack else None
     val = stack.pop() if stack else None
@@ -253,7 +261,6 @@ def exec_tok(tok, stack, env, rt, console_cb):
     if h: h(stack, env, rt)
     else: rt.append(('err', tok[1]+'?'))
 
-# ── Parser ────────────────────────────────────────────────────────────────────
 def parse_program(src):
     prog = []
     for i, raw in enumerate(src.split('\n')):
@@ -336,7 +343,6 @@ def step_one_op(S, console_cb):
         disp['stack_snap']=list(S['stack'])
     return True
 
-# ── App ───────────────────────────────────────────────────────────────────────
 class App:
     def __init__(self, root):
         self.root = root
@@ -346,18 +352,17 @@ class App:
         self.mono      = tkfont.Font(family=FONT_NAME, size=FONT_SIZE)
         self.mono_bold = tkfont.Font(family=FONT_NAME, size=FONT_SIZE, weight="bold")
 
-        self.exec_state   = None
-        self.panel_widths = list(PANEL_WIDTHS)
+        self.exec_state    = None
+        self.panel_widths  = list(PANEL_WIDTHS)
         self.focused_panel = 0
+        self._last_status  = "Ready."
 
         self._build_ui()
         self._highlight_code()
         self._update_titles()
         self._update_status("Ready.")
 
-    # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
-        # title row
         self.title_frame = tk.Frame(self.root, bg=BG)
         self.title_frame.pack(side=tk.TOP, fill=tk.X)
         self.title_labels = []
@@ -370,7 +375,6 @@ class App:
             lbl.bind("<Button-1>", lambda e, idx=i: self._focus_panel(idx))
             self.title_labels.append(lbl)
 
-        # panels row — use a plain Frame, pack widgets left with fixed width
         self.panels_frame = tk.Frame(self.root, bg=BG)
         self.panels_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -397,21 +401,16 @@ class App:
         self._setup_rt_tags()
         self._setup_vars_tags()
 
-        # insert demo
         self.code_text.insert("1.0", DEMO)
 
-        # code bindings
         self.code_text.bind("<FocusIn>",    lambda e: self._focus_panel(0))
         self.code_text.bind("<KeyRelease>", self._on_code_change)
-        # arrow keys — return "break" to suppress default cursor move
-        self.code_text.bind("<Left>",  self._tok_left)
-        self.code_text.bind("<Right>", self._tok_right)
-        self.code_text.bind("<Up>",    self._tok_up)
-        self.code_text.bind("<Down>",  self._tok_down)
-        # printable key replaces selection
-        self.code_text.bind("<Key>",   self._on_key_replace)
+        self.code_text.bind("<Left>",       self._tok_left)
+        self.code_text.bind("<Right>",      self._tok_right)
+        self.code_text.bind("<Up>",         self._tok_up)
+        self.code_text.bind("<Down>",       self._tok_down)
+        self.code_text.bind("<Key>",        self._on_key_replace)
 
-        # console
         tk.Label(self.root, text=" Console",
                  font=self.mono_bold, bg=BG_TITLE, fg=FG,
                  anchor='w').pack(side=tk.TOP, fill=tk.X)
@@ -422,13 +421,11 @@ class App:
         )
         self.console_text.pack(side=tk.TOP, fill=tk.X)
 
-        # status
         self.status_var = tk.StringVar()
         tk.Label(self.root, textvariable=self.status_var,
                  font=self.mono, bg=BG_STATUS, fg=FG_STATUS,
                  anchor='w', padx=PAD).pack(side=tk.BOTTOM, fill=tk.X)
 
-        # global keys
         self.root.bind("<F5>",        lambda e: self._do_run())
         self.root.bind("<F6>",        lambda e: self._do_step_line())
         self.root.bind("<F7>",        lambda e: self._do_step_op())
@@ -438,11 +435,10 @@ class App:
         self.root.bind("<Alt-equal>", self._panel_wider)
         self.root.bind("<Alt-minus>", self._panel_narrower)
 
-    # ── Tags ──────────────────────────────────────────────────────────────────
     def _setup_code_tags(self):
         t = self.code_text
         t.tag_configure("lit",     foreground=COL_LIT)
-        t.tag_configure("op",      foreground=COL_OP,      font=self.mono_bold)
+        t.tag_configure("op",      foreground=COL_OP,   font=self.mono_bold)
         t.tag_configure("deref",   foreground=COL_DEREF)
         t.tag_configure("sym",     foreground=COL_SYM)
         t.tag_configure("comment", foreground=COL_COMMENT)
@@ -451,12 +447,12 @@ class App:
     def _setup_rt_tags(self):
         t = self.rt_text
         t.tag_configure("val",      foreground="#000000", background=COL_RT_VAL_BG)
-        t.tag_configure("op",       foreground=COL_OP,    font=self.mono_bold)
+        t.tag_configure("op",       foreground=COL_OP,   font=self.mono_bold)
         t.tag_configure("sym",      foreground="#555555")
-        t.tag_configure("err",      foreground="#ffffff",  background=COL_RT_ERR_BG,
+        t.tag_configure("err",      foreground="#ffffff", background=COL_RT_ERR_BG,
                         font=self.mono_bold)
         t.tag_configure("lit",      foreground=COL_LIT)
-        t.tag_configure("code_op",  foreground=COL_OP,    font=self.mono_bold)
+        t.tag_configure("code_op",  foreground=COL_OP,   font=self.mono_bold)
         t.tag_configure("deref",    foreground=COL_DEREF)
         t.tag_configure("code_sym", foreground=COL_SYM)
         t.tag_configure("comment",  foreground=COL_COMMENT)
@@ -467,7 +463,6 @@ class App:
         t.tag_configure("key", foreground=COL_VAR_KEY, font=self.mono_bold)
         t.tag_configure("val", foreground="#000000",   background=COL_RT_VAL_BG)
 
-    # ── Highlight ─────────────────────────────────────────────────────────────
     def _highlight_code(self):
         t = self.code_text
         for tag in ("lit","op","deref","sym","comment","unknown"):
@@ -480,7 +475,6 @@ class App:
     def _on_code_change(self, event=None):
         self._highlight_code()
 
-    # ── Token navigation ──────────────────────────────────────────────────────
     def _all_token_positions(self):
         lines = self.code_text.get("1.0", tk.END).split('\n')
         result = []
@@ -495,7 +489,6 @@ class App:
         for i, (s, e) in enumerate(tokens):
             if t.compare(s, "<=", cur) and t.compare(cur, "<", e):
                 return i
-        # not inside any token — find first token at or after cursor
         for i, (s, e) in enumerate(tokens):
             if t.compare(s, ">=", cur):
                 return i
@@ -524,7 +517,7 @@ class App:
         return "break"
 
     def _tok_up(self, event):
-        t   = self.code_text
+        t = self.code_text
         cur = t.index(tk.INSERT)
         row, col = map(int, cur.split('.'))
         if row > 1:
@@ -535,7 +528,7 @@ class App:
         return "break"
 
     def _tok_down(self, event):
-        t   = self.code_text
+        t = self.code_text
         cur = t.index(tk.INSERT)
         row, col = map(int, cur.split('.'))
         t.mark_set(tk.INSERT, f"{row+1}.{col}")
@@ -545,7 +538,6 @@ class App:
         return "break"
 
     def _on_key_replace(self, event):
-        # let Ctrl combos pass through (undo, copy, etc.)
         if event.state & 0x4:
             return
         if not event.char or not event.char.isprintable():
@@ -561,9 +553,8 @@ class App:
             self._highlight_code()
             return "break"
         except tk.TclError:
-            pass  # no selection — normal insert
+            pass
 
-    # ── Panel focus / resize ──────────────────────────────────────────────────
     def _focus_panel(self, idx):
         self.focused_panel = idx
         if idx == 0:
@@ -600,7 +591,6 @@ class App:
             panels[i].configure(width=w)
             self.title_labels[i].configure(width=w)
 
-    # ── Console ───────────────────────────────────────────────────────────────
     def _console_write(self, s):
         t = self.console_text
         t.configure(state=tk.NORMAL)
@@ -614,7 +604,6 @@ class App:
         t.delete("1.0", tk.END)
         t.configure(state=tk.DISABLED)
 
-    # ── Execution ─────────────────────────────────────────────────────────────
     def _ensure_state(self):
         if self.exec_state is None:
             self.exec_state = make_state(self.code_text.get("1.0", tk.END))
@@ -654,7 +643,6 @@ class App:
         self._refresh_rt_panels()
         self._update_status("Reset.")
 
-    # ── Refresh read-only panels ──────────────────────────────────────────────
     def _refresh_rt_panels(self):
         self._refresh_runtime()
         self._refresh_stack()
@@ -714,12 +702,11 @@ class App:
                 t.insert(tk.END, "\n")
         self._set_ro_text(self.vars_text, fill)
 
-    # ── Status ────────────────────────────────────────────────────────────────
     def _update_status(self, msg=None):
         if msg is not None:
             self._last_status = msg
         else:
-            msg = getattr(self, '_last_status', 'Ready.')
+            msg = self._last_status
         p = self.focused_panel
         self.status_var.set(
             f" {msg}  [{PANEL_NAMES[p]}: {self.panel_widths[p]}]"
@@ -728,7 +715,6 @@ class App:
         )
 
 
-# ── Entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     root = tk.Tk()
     App(root)
