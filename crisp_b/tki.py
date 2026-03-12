@@ -3,19 +3,14 @@ from tkinter import font as tkfont
 import re
 import ctypes
 
-# Must be before Tk() — prevents Windows DPI bitmap scaling blur
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
     try:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
 
-# Sharpest options:
-# "Fixedsys" size 9  — bitmap, zero AA, only works at 9
-# "Consolas"  size 10 — ClearType hinted, very clean
-# "Lucida Console" size 10 — strong hinting
 FONT_NAME = "Consolas"
 FONT_SIZE = 16
 PAD = 4
@@ -65,6 +60,8 @@ COL_RT_VAL_BG  = "#ffee00"
 COL_RT_ERR_BG  = "#ff4444"
 COL_VAR_KEY    = "#007700"
 
+ZERO = ('int', 0)
+
 def classify_token(tok):
     if tok == 'true':  return ('lit',   ('bool', True))
     if tok == 'false': return ('lit',   ('bool', False))
@@ -75,6 +72,7 @@ def classify_token(tok):
     if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*:$', tok): return ('deref', tok[:-1])
     if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', tok):  return ('sym',   tok)
     return ('unknown', tok)
+
 def tokenize_line(line):
     s = line.split('//')[0]
     tokens = []
@@ -152,90 +150,85 @@ def full_deref(x, env):
         x = nxt
     return x
 
+# Always returns a value — ZERO if stack empty. Caller's problem if data is wrong.
 def popd(stack, env):
-    x = stack.pop() if stack else None
-    return full_deref(x, env)
+    return full_deref(stack.pop() if stack else ZERO, env)
+
+def pops(stack):
+    return stack.pop() if stack else ZERO
+
+# Ops no longer check for None — bad data yields zero-based results.
 
 def op_set(stack, env, rt):
-    nm = stack.pop() if stack else None
-    val = stack.pop() if stack else None
-    if not nm or nm[0] != 'sym': rt.append(('err','SET!')); return
+    nm  = pops(stack)
+    val = pops(stack)
     env[nm[1]] = val; stack.append(nm); rt.append(('op','SET'))
 
 def op_setv(stack, env, rt):
-    nm = stack.pop() if stack else None
-    val = stack.pop() if stack else None
-    if not nm or nm[0] != 'sym': rt.append(('err','SETV!')); return
+    nm  = pops(stack)
+    val = pops(stack)
     env[nm[1]] = full_deref(val, env); stack.append(nm); rt.append(('op','SETV'))
 
 def op_setl(stack, env, rt):
-    nm = stack.pop() if stack else None
-    if not nm or nm[0] != 'sym': rt.append(('err','SETL!')); return
+    nm = pops(stack)
     env[nm[1]] = mk_list(list(stack)); stack.clear(); stack.append(nm); rt.append(('op','SETL'))
 
 def op_sum(stack, env, rt):
-    b = popd(stack,env); a = popd(stack,env)
-    if a is None or b is None: rt.append(('err','SUM!')); return
-    res = mk_num(to_num(a)+to_num(b)); stack.append(res); rt.append(('val',val_str(res)))
+    b = popd(stack, env); a = popd(stack, env)
+    res = mk_num(to_num(a) + to_num(b)); stack.append(res); rt.append(('val', val_str(res)))
 
 def op_sub(stack, env, rt):
-    b = popd(stack,env); a = popd(stack,env)
-    if a is None or b is None: rt.append(('err','SUB!')); return
-    res = mk_num(to_num(a)-to_num(b)); stack.append(res); rt.append(('val',val_str(res)))
+    b = popd(stack, env); a = popd(stack, env)
+    res = mk_num(to_num(a) - to_num(b)); stack.append(res); rt.append(('val', val_str(res)))
 
 def op_mul(stack, env, rt):
-    b = popd(stack,env); a = popd(stack,env)
-    if a is None or b is None: rt.append(('err','MUL!')); return
-    res = mk_num(to_num(a)*to_num(b)); stack.append(res); rt.append(('val',val_str(res)))
+    b = popd(stack, env); a = popd(stack, env)
+    res = mk_num(to_num(a) * to_num(b)); stack.append(res); rt.append(('val', val_str(res)))
 
 def op_div(stack, env, rt):
-    b = popd(stack,env); a = popd(stack,env)
-    if a is None or b is None or to_num(b)==0: rt.append(('err','DIV!')); return
-    res = mk_num(to_num(a)/to_num(b)); stack.append(res); rt.append(('val',val_str(res)))
+    b = popd(stack, env); a = popd(stack, env)
+    bv = to_num(b)
+    res = mk_num(to_num(a) / bv) if bv != 0 else mk_flt(-0.0)
+    stack.append(res); rt.append(('val', val_str(res)))
 
 def op_mod(stack, env, rt):
-    b = popd(stack,env); a = popd(stack,env)
-    if a is None or b is None: rt.append(('err','MOD!')); return
-    res = mk_int(int(to_num(a))%int(to_num(b))); stack.append(res); rt.append(('val',val_str(res)))
+    b = popd(stack, env); a = popd(stack, env)
+    bv = int(to_num(b))
+    res = mk_int(int(to_num(a)) % bv) if bv != 0 else mk_int(0)
+    stack.append(res); rt.append(('val', val_str(res)))
 
 def op_inc(stack, env, rt):
-    nm = stack.pop() if stack else None
-    if not nm or nm[0] != 'sym': rt.append(('err','INC!')); return
-    env[nm[1]] = mk_num(to_num(env.get(nm[1], mk_int(0)))+1)
-    stack.append(env[nm[1]]); rt.append(('op','INC'))
+    nm = pops(stack)
+    env[nm[1]] = mk_num(to_num(env.get(nm[1], ZERO)) + 1)
+    stack.append(env[nm[1]]); rt.append(('op', 'INC'))
 
 def op_dec(stack, env, rt):
-    nm = stack.pop() if stack else None
-    if not nm or nm[0] != 'sym': rt.append(('err','DEC!')); return
-    env[nm[1]] = mk_num(to_num(env.get(nm[1], mk_int(0)))-1)
-    stack.append(env[nm[1]]); rt.append(('op','DEC'))
+    nm = pops(stack)
+    env[nm[1]] = mk_num(to_num(env.get(nm[1], ZERO)) - 1)
+    stack.append(env[nm[1]]); rt.append(('op', 'DEC'))
 
 def op_apd(stack, env, rt):
-    list_nm = stack.pop() if stack else None
-    val = stack.pop() if stack else None
-    if not list_nm or list_nm[0] != 'sym': rt.append(('err','APD!')); return
+    list_nm = pops(stack)
+    val     = pops(stack)
     if list_nm[1] not in env or env[list_nm[1]][0] != 'list':
         env[list_nm[1]] = mk_list([])
-    env[list_nm[1]][1].append(val); stack.append(list_nm); rt.append(('op','APD'))
+    env[list_nm[1]][1].append(val); stack.append(list_nm); rt.append(('op', 'APD'))
 
 def op_log(stack, env, rt, console_cb):
-    val = stack.pop() if stack else None
-    if val is None: rt.append(('err','LOG!')); return
-    console_cb(val_str(full_deref(val, env))); rt.append(('op','LOG'))
+    val = pops(stack)
+    console_cb(val_str(full_deref(val, env))); rt.append(('op', 'LOG'))
 
 def op_pstack(stack, env, rt, console_cb):
-    console_cb('STACK: '+' '.join(val_str(x) for x in stack)); rt.append(('op','PSTACK'))
+    console_cb('STACK: ' + ' '.join(val_str(x) for x in stack)); rt.append(('op', 'PSTACK'))
 
 def op_deref_op(stack, env, rt):
-    top = stack.pop() if stack else None
-    if top is None: rt.append(('err',':!')); return
-    val = full_deref(top, env) if top[0]=='sym' else top
-    stack.append(val); rt.append(('val',val_str(val)))
+    top = pops(stack)
+    val = full_deref(top, env) if top[0] == 'sym' else top
+    stack.append(val); rt.append(('val', val_str(val)))
 
 def op_underscore(stack, env, rt):
-    top = stack.pop() if stack else None
-    if top is None: rt.append(('err','_!')); return
-    stack.append(top); rt.append(('val',val_str(top)))
+    top = pops(stack)
+    stack.append(top); rt.append(('val', val_str(top)))
 
 def exec_tok(tok, stack, env, rt, console_cb):
     kind = tok[0]
@@ -247,19 +240,19 @@ def exec_tok(tok, stack, env, rt, console_cb):
         val = full_deref(mk_sym(tok[1]), env)
         stack.append(val); rt.append(('val', val_str(val))); return
     if kind == 'unknown':
-        rt.append(('err', tok[1]+'?')); return
+        rt.append(('err', tok[1] + '?')); return
     op_map = {
         'SET':op_set,'SETV':op_setv,'SETL':op_setl,'SETL*':op_setl,
         'SUM':op_sum,'SUB':op_sub,'MUL':op_mul,'DIV':op_div,'MOD':op_mod,
         'INC':op_inc,'DEC':op_dec,'APD':op_apd,
         ':':op_deref_op,'_':op_underscore,
     }
-    log_ops = {'LOG':op_log,'PSTACK':op_pstack}
+    log_ops = {'LOG': op_log, 'PSTACK': op_pstack}
     if tok[1] in log_ops:
         log_ops[tok[1]](stack, env, rt, console_cb); return
     h = op_map.get(tok[1])
     if h: h(stack, env, rt)
-    else: rt.append(('err', tok[1]+'?'))
+    else: rt.append(('err', tok[1] + '?'))
 
 def parse_program(src):
     prog = []
@@ -270,12 +263,12 @@ def parse_program(src):
     for_stack = []
     for i, line in enumerate(prog):
         toks = line['tokens']
-        if any(t==('op','FOR') for t in toks):
-            for_stack.append(i); line['is_for']=True
-        if len(toks)==1 and toks[0]==('op','END'):
-            line['is_end']=True
+        if any(t == ('op','FOR') for t in toks):
+            for_stack.append(i); line['is_for'] = True
+        if len(toks) == 1 and toks[0] == ('op','END'):
+            line['is_end'] = True
             if for_stack:
-                fi=for_stack.pop(); prog[fi]['end_pc']=i; line['for_pc']=fi
+                fi = for_stack.pop(); prog[fi]['end_pc'] = i; line['for_pc'] = fi
     return prog
 
 def make_state(src):
@@ -289,58 +282,56 @@ def step_one_op(S, console_cb):
     while S['pc'] < len(prog):
         if not prog[S['pc']]['tokens']:
             d = S['display'][S['pc']]
-            d['visited']=True; d['rt_parts']=[]; d['stack_snap']=[]
-            S['pc']+=1; S['op_idx']=0; S['stack']=[]
+            d['visited'] = True; d['rt_parts'] = []; d['stack_snap'] = []
+            S['pc'] += 1; S['op_idx'] = 0; S['stack'] = []
         else: break
-    if S['pc'] >= len(prog): S['done']=True; return False
+    if S['pc'] >= len(prog): S['done'] = True; return False
 
     line = prog[S['pc']]; disp = S['display'][S['pc']]
-    if S['op_idx']==0: disp['rt_parts']=[]; disp['stack_snap']=[]
-    disp['visited']=True
+    if S['op_idx'] == 0: disp['rt_parts'] = []; disp['stack_snap'] = []
+    disp['visited'] = True
 
     if S['op_idx'] >= len(line['tokens']):
-        disp['stack_snap']=list(S['stack'])
-        S['pc']+=1; S['op_idx']=0; S['stack']=[]; return True
+        disp['stack_snap'] = list(S['stack'])
+        S['pc'] += 1; S['op_idx'] = 0; S['stack'] = []; return True
 
-    tok = line['tokens'][S['op_idx']]; rt=[]; jumped=False
+    tok = line['tokens'][S['op_idx']]; rt = []; jumped = False
 
-    if tok==('op','FOR'):
-        var_tok=S['stack'].pop() if S['stack'] else None
-        step_v=to_num(popd(S['stack'],S['env']))
-        to_v  =to_num(popd(S['stack'],S['env']))
-        from_v=to_num(popd(S['stack'],S['env']))
-        if not var_tok or var_tok[0]!='sym': rt.append(('err','FOR!'))
-        else:
-            S['env'][var_tok[1]]=mk_num(from_v)
-            S['loop_stack'].append({'var':var_tok[1],'to':to_v,'step':step_v,
-                                    'for_pc':S['pc'],'end_pc':line['end_pc']})
-            rt.append(('op','FOR'))
-            if (step_v>0 and from_v>to_v) or (step_v<0 and from_v<to_v):
-                S['pc']=line['end_pc']+1; S['op_idx']=0; S['stack']=[]; jumped=True
+    if tok == ('op','FOR'):
+        var_tok = pops(S['stack'])
+        step_v  = to_num(popd(S['stack'], S['env']))
+        to_v    = to_num(popd(S['stack'], S['env']))
+        from_v  = to_num(popd(S['stack'], S['env']))
+        S['env'][var_tok[1]] = mk_num(from_v)
+        S['loop_stack'].append({'var':var_tok[1],'to':to_v,'step':step_v,
+                                'for_pc':S['pc'],'end_pc':line['end_pc']})
+        rt.append(('op','FOR'))
+        if (step_v > 0 and from_v > to_v) or (step_v < 0 and from_v < to_v):
+            S['pc'] = line['end_pc'] + 1; S['op_idx'] = 0; S['stack'] = []; jumped = True
         disp['rt_parts'].extend(rt)
-        if not jumped: S['op_idx']+=1
-        disp['stack_snap']=list(S['stack']); return True
+        if not jumped: S['op_idx'] += 1
+        disp['stack_snap'] = list(S['stack']); return True
 
-    if tok==('op','END'):
+    if tok == ('op','END'):
         if not S['loop_stack']:
             rt.append(('err','END!')); disp['rt_parts'].extend(rt)
-            S['op_idx']+=1; disp['stack_snap']=list(S['stack']); return True
-        loop=S['loop_stack'][-1]
-        cur=to_num(S['env'].get(loop['var'],mk_int(0)))+loop['step']
-        S['env'][loop['var']]=mk_num(cur)
-        cont=(cur<=loop['to']) if loop['step']>0 else (cur>=loop['to'])
-        if cont: S['pc']=loop['for_pc']+1; S['op_idx']=0; S['stack']=[]
-        else:    S['loop_stack'].pop(); S['pc']+=1; S['op_idx']=0; S['stack']=[]
+            S['op_idx'] += 1; disp['stack_snap'] = list(S['stack']); return True
+        loop = S['loop_stack'][-1]
+        cur  = to_num(S['env'].get(loop['var'], ZERO)) + loop['step']
+        S['env'][loop['var']] = mk_num(cur)
+        cont = (cur <= loop['to']) if loop['step'] > 0 else (cur >= loop['to'])
+        if cont: S['pc'] = loop['for_pc'] + 1; S['op_idx'] = 0; S['stack'] = []
+        else:    S['loop_stack'].pop(); S['pc'] += 1; S['op_idx'] = 0; S['stack'] = []
         rt.append(('op','END')); disp['rt_parts'].extend(rt)
-        disp['stack_snap']=list(S['stack']); return True
+        disp['stack_snap'] = list(S['stack']); return True
 
     exec_tok(tok, S['stack'], S['env'], rt, console_cb)
-    disp['rt_parts'].extend(rt); S['op_idx']+=1
-    if S['op_idx']>=len(line['tokens']):
-        disp['stack_snap']=list(S['stack'])
-        S['pc']+=1; S['op_idx']=0; S['stack']=[]
+    disp['rt_parts'].extend(rt); S['op_idx'] += 1
+    if S['op_idx'] >= len(line['tokens']):
+        disp['stack_snap'] = list(S['stack'])
+        S['pc'] += 1; S['op_idx'] = 0; S['stack'] = []
     else:
-        disp['stack_snap']=list(S['stack'])
+        disp['stack_snap'] = list(S['stack'])
     return True
 
 class App:
@@ -506,25 +497,21 @@ class App:
 
     def _tok_left(self, event):
         tokens = self._all_token_positions()
-        idx    = self._current_token_index(tokens)
-        self._select_token(idx - 1, tokens)
+        self._select_token(self._current_token_index(tokens) - 1, tokens)
         return "break"
 
     def _tok_right(self, event):
         tokens = self._all_token_positions()
-        idx    = self._current_token_index(tokens)
-        self._select_token(idx + 1, tokens)
+        self._select_token(self._current_token_index(tokens) + 1, tokens)
         return "break"
 
     def _tok_up(self, event):
         t = self.code_text
         cur = t.index(tk.INSERT)
         row, col = map(int, cur.split('.'))
-        if row > 1:
-            t.mark_set(tk.INSERT, f"{row-1}.{col}")
+        if row > 1: t.mark_set(tk.INSERT, f"{row-1}.{col}")
         tokens = self._all_token_positions()
-        idx    = self._current_token_index(tokens)
-        self._select_token(idx, tokens)
+        self._select_token(self._current_token_index(tokens), tokens)
         return "break"
 
     def _tok_down(self, event):
@@ -533,15 +520,12 @@ class App:
         row, col = map(int, cur.split('.'))
         t.mark_set(tk.INSERT, f"{row+1}.{col}")
         tokens = self._all_token_positions()
-        idx    = self._current_token_index(tokens)
-        self._select_token(idx, tokens)
+        self._select_token(self._current_token_index(tokens), tokens)
         return "break"
 
     def _on_key_replace(self, event):
-        if event.state & 0x4:
-            return
-        if not event.char or not event.char.isprintable():
-            return
+        if event.state & 0x4: return
+        if not event.char or not event.char.isprintable(): return
         t = self.code_text
         try:
             sel_start = t.index(tk.SEL_FIRST)
@@ -557,8 +541,7 @@ class App:
 
     def _focus_panel(self, idx):
         self.focused_panel = idx
-        if idx == 0:
-            self.code_text.focus_set()
+        if idx == 0: self.code_text.focus_set()
         self._update_titles()
         self._update_status()
 
@@ -576,14 +559,12 @@ class App:
     def _panel_wider(self, event=None):
         p = self.focused_panel
         self.panel_widths[p] += 2
-        self._apply_widths()
-        self._update_status()
+        self._apply_widths(); self._update_status()
 
     def _panel_narrower(self, event=None):
         p = self.focused_panel
         self.panel_widths[p] = max(6, self.panel_widths[p] - 2)
-        self._apply_widths()
-        self._update_status()
+        self._apply_widths(); self._update_status()
 
     def _apply_widths(self):
         panels = [self.code_text, self.rt_text, self.stack_text, self.vars_text]
@@ -703,17 +684,14 @@ class App:
         self._set_ro_text(self.vars_text, fill)
 
     def _update_status(self, msg=None):
-        if msg is not None:
-            self._last_status = msg
-        else:
-            msg = self._last_status
+        if msg is not None: self._last_status = msg
+        else: msg = self._last_status
         p = self.focused_panel
         self.status_var.set(
             f" {msg}  [{PANEL_NAMES[p]}: {self.panel_widths[p]}]"
             "    F5=Run  F6=StepLine  F7=StepOp  F8=Reset"
             "  Tab=panel  Alt+/-=width  Ctrl+Q=quit"
         )
-
 
 if __name__ == "__main__":
     root = tk.Tk()
