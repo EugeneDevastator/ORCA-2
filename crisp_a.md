@@ -36,8 +36,20 @@ Inside `[ ]`: if `^` reaches the end of a scope without being handled, the scope
 5 0 DIV _ c SET     // DIV produces ^, SET receives ^, returns ^, row ends
 player.weapon: a SET // weapon missing -> ^ -> a = ^
 a: API_FIRE         // API receives ^, returns ^, row ends
+$, inserts stack in argument place. and auto indexes. used naturally as positional arguments $0 $1 ...
 ```
+### STack consumption
 
+```
+1 2 3 ADD 5 // 1 is consumed; even when stack is bigger than number of inputs - it gets reset.
+
+1 ; 2 3 ADD 5 // stack here is 1 ; 5, 1 was preserved.
+1 ; 5 ; ADD 6 // stack is 1 5 ; 6
+2 ADD 8 //  1 5 was not carried, 6 was. 6+2 = 8.
+1; 5; ADD 6 ADD ^ // cannot do ADD 6 ADD
+1; 5; ADD 6 $ ADD // 11, because inserted stack is 1 5 6  
+1; 5; ADD 6 $-1 $-2 ADD // adds 1 and 5, bottom of stack.
+```
 ---
 
 ### `^`-Aware Operators
@@ -226,6 +238,24 @@ a sB HASALL
 sA:idx              // index into sequence — ^ if out of bounds
 sA: -1              // last element
 ```
+#### inline lists.
+are allowed as syntax [1 2 3 4]
+entire list is treated as one syntax token then.
+[ 2 3 4 ] is not valid. ] and [ are scope operators when alone.
+
+
+#### List and $tack
+1 2 3; 4 5 ADD 9 $ a SETL // forms a from stack, makeing [1 2 3 9]
+1 2 3; 4 5 ADD 9 $ -2 0 SLICE [2 3 9] a 
+3 $ SET // valid - sets stack to 3, moves ; to 0 pos.
+
+#### Indexing
+
+1 3 2 5 a SETL // [1 3 2 5]
+a.0 // 1
+a.-0 // 5 minus zero is valid. all values are backed by signed variants always.
+a 1 -1 SLICE [3 2]
+
 
 #### Aggregation
 ```
