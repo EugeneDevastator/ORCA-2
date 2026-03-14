@@ -1,6 +1,10 @@
-Aye Captain!
+## Aye Captain!
 
-## Crisp Language Spec v1.4
+Here is the updated spec:
+
+---
+
+## Crisp Language Spec v1.5
 
 ---
 
@@ -64,8 +68,6 @@ Every operator produces output. No silent operators except X-variants.
 5 3 ADD x SET       // ADD pushes to stack, SET reads stack
 ```
 
-`_` in switch default case: see Switch section.
-
 ---
 
 ### Stack Consumption
@@ -91,10 +93,10 @@ $:          // push entire stack as list
 $:0         // first element
 $:-1        // last element
 $:-2        // second from last
-3 $ SET     // replace stack with [3], ; moves to position 0
+3 $ SET     // replace stack with [3]
 ```
 
-`$` always sees the full current stack including below `;` frames. `;` only prevents operators from clearing below it — `$` reads all.
+`$` always sees the full current stack including below `;` frames. `;` only prevents operators from clearing below it.
 
 ```
 1 2 3 ; 4 5 ADD      // stack: [1 2 3 ; 9]
@@ -148,14 +150,11 @@ _           // positional placeholder — not storable, not pushable
 | Sigil | Role |
 |---|---|
 | `_` | positional output slot — operator writes result here |
-| `a:` | dereference — evaluate symbol a, push its value |
+| `a:` | read variable a, push its value |
 | `;` | stack frame marker — protects stack below from operator erasure |
 | `$` | stack reference — current stack as readable/writable list |
-#### Lambdas
-```
->OP>                // operator as data, single op
->$:0 $:1 ADD>         // closure with positional args
-4 p3ow              // apply: expands positional args left to right---
+
+---
 
 ### Scope
 
@@ -178,19 +177,15 @@ val IF {
 All variables default to `0`. No uninitialized errors.
 
 ```
-b a SET         // set a to b
+0 b SET
+b: a SET        // read b, store value into a
 11 b SET        // set b to 11
-a:              // push value of a
-b: 13 2 ADD     // dereference b, then add 13+2
+a:              // push value of a which is 0
+1 c SET
+c a SET         // sets a to value of c.
+/c a SET        // sets a to symbol c.
+
 b: 1 ADD _ b SET  // increment b
-```
-
----
-
-### Stack Frames
-
-```
-1 2 ADD _ 3 4 ; 6 3 DIV _ ; ADD _
 ```
 
 ---
@@ -202,7 +197,6 @@ b: 1 ADD _ b SET  // increment b
 ```
 profile.shared:
 profile.inst: _ .components _ .count
-pos.x:              // dereference field x of pos
 3 pos.x SET         // write 3 to field x of pos
 ```
 
@@ -231,7 +225,7 @@ val SWEQ {
 }
 ```
 
-`*` is the default/fallthrough case. Only valid inside `SW` and `SWEQ`. Not a general token.
+`*` is the default/fallthrough case. Only valid inside `SW` and `SWEQ`.
 
 ---
 
@@ -277,12 +271,15 @@ sA: sB: SUBT
 a sB: HAS
 sA:n                // index n into sA — ^ if out of bounds
 sA:-1               // last element
+sA:idx              // dynamic index — idx resolves immediately
 ```
 
 #### Inline Lists
 
-`[1 2 3 4]` — no spaces around brackets — is a single list literal token.
-`{ 1 2 3 }` with spaces is a scope block. Parser rule: `[` with no preceding whitespace starts a list literal.
+`[1 2 3 4]` — no spaces around brackets — is a single list literal token. spaces are also allowed
+[ 1 2 3 4 ] 
+`{ 1 2 3 }` with spaces is a scope block.
+{1 2 3} also ok, brackets are comppiler trigger in itself.
 
 ```
 [1 2 3]     // list literal token
@@ -296,6 +293,7 @@ sA:-1               // last element
 a:0             // 1
 a:-1            // 5
 a:1             // 3
+a:idx           // element at index idx — resolved at runtime
 a: 1 -1 SLICE   // [3 2]
 ```
 
@@ -349,9 +347,19 @@ sym DECAT
 
 ---
 
-## API Process Handles
+### Lambdas
 
-A process handle is returned by async operations. `@handle` is a display annotation — not user-typed.
+```
+>OP>                // operator as data, single op
+>a0 a1 ADD>         // closure with positional args
+4 lambda APPLY      // expands positional args left to right
+```
+
+---
+
+### API Process Handles
+
+A process handle is returned by async operations.
 
 ```
 from to time setter TWEEN _ tw SET
@@ -445,7 +453,7 @@ a: _ 7 ADD _ b SET| a: 3 7 ADD 10 b SET  | b=10
 0 a SET
 1 b SET
 0 s SET
-a b flist SETL
+a: b: flist SETL
 13 i FOR {
     a: b: ADD _ c SET
     c: flist: APD
@@ -471,5 +479,5 @@ closest: API_DISTANCE _ 50 IFL _ 4 ENTITY_SECTOR_CEIL_Z_SET
 
 ### Open Items
 
-- `SETL` from symbols vs values: both use same syntax, disambiguation is by whether tokens are bare symbols or dereferenced. Bare `a b c sA SETL` stores symbol references. Dereferenced `a: b: c: sA SETL` stores values. Needs runtime confirmation.
+- `SETL` from symbols vs values: bare `a b c sA SETL` uses current values of a, b, c. Dereferenced `a: b: c: sA SETL` is equivalent — `:` is always explicit read. No ambiguity.
 - `SUM` variadic behavior with `;` frames: does SUM consume only above the frame or all? TBD.
