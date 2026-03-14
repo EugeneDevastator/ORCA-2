@@ -1,6 +1,4 @@
-Aye Captain!
-
-## 'Crisp' Language Spec v1.2
+## Crisp Language Spec v1.3
 
 ---
 
@@ -10,42 +8,71 @@ A program is a list of **rows**. Each row executes left to right.
 
 **Stack** is per-row, reset each row unless `;` is used.
 
-**Execution rule:** A token is either a **literal** (pushes to stack) or an **operator** (consumes stack, produces output). Execution on a row continues as long as tokens produce output. If an operator produces `^`, execution of that row stops and unwinds through all enclosing scopes until it exits or hits a scope boundary that catches it.
+**Execution rule:** A token is either a **literal** (pushes to stack) or an **operator** (consumes stack, produces output). Execution continues as long as tokens produce output.
 
-**Output slot:** Every operator that succeeds writes its result to the right — this result is immediately pushed onto the stack for the next token.
+**Default values:** All variables default to `0`. Uninitialized reads return `0`.
 
 ---
 
 ### Stop Symbol `^`
 
-`^` is the universal stop value. When any operator produces `^`, execution halts immediately at that point and propagates outward through enclosing `[ ]` scopes.
+`^` is an error sentinel — a typed value distinct from all numeric values including `0`.
 
-- Any operator receiving invalid input produces `^`
-- Division by zero produces `^`
-- Failed property access produces `^`
-- User can push `^` explicitly to force stop
-- `^` is a valid symbol name if assigned — compiler treats bare `^` as the stop command
+`^` originates only from:
+- Math operations with undefined results (`DIV` by zero, `SQRT` of negative)
+- API calls that receive `^` as any argument — banned, return `^`
+- API calls that fail (invalid object, missing property, bad state)
+- Explicit user push: bare `^` token
+
+`^` is **not** produced by uninitialized variable reads (those return `0`).
+
+**Propagation rule:** `^` is a value on the stack. Operators that cannot process `^` return `^`. This naturally propagates through a row until the row ends or a `^`-aware operator handles it.
+
+Inside `[ ]`: if `^` reaches the end of a scope without being handled, the scope exits and pushes `^` onto the parent stack. Parent row then encounters `^` and propagates the same way.
+
+**No special unwinding.** `^` propagates by value, not by exception mechanism.
 
 ```
-5 0 DIV         // produces ^, row stops here
-5 0 DIV _ c SET // ^ propagates, c SET never fires
+5 0 DIV _ c SET     // DIV produces ^, SET receives ^, returns ^, row ends
+player.weapon: a SET // weapon missing -> ^ -> a = ^
+a: API_FIRE         // API receives ^, returns ^, row ends
 ```
 
-State is never mutated after `^` is produced on a row.
+---
+
+### `^`-Aware Operators
+
+These operators explicitly handle `^` and do not propagate it:
+
+```
+a: ISOK             // pushes 1 if a is not ^, 0 if a is ^
+a: 0 ORDEF          // pushes a if not ^, else pushes 0
+a: ^ EQ             // 1 if a is ^, 0 otherwise — EQ handles ^ on both sides
+a: ^ NEQ            // inverse
+```
+
+`SW` and `SWEQ` can match `^` as a case:
+
+```
+val SW [
+    _ ^ EQ   "error"  PRIN 1
+    _ 5 LESS "lt5"    PRIN 1
+    _         "else"  PRIN 1
+]
+```
 
 ---
 
 ### Tokens
 
 #### Literals
-Push directly onto stack.
-
 ```
 42          // integer
 3.14        // float
 "hello"     // string
-1 0  // bool
-^           // stop — halts execution immediately
+1 0         // bool (1 = true, 0 = false)
+^           // error sentinel
+_           // empty space placeholder, cannot be stored or pushed onto stack. interpreter just skips it or writes over it.
 ```
 
 #### Sigils
@@ -54,13 +81,13 @@ Push directly onto stack.
 |---|---|
 | `_` | capture result inline — binds last output to next token |
 | `a:` | dereference — evaluate symbol a, push its value |
-| `;` | stack frame marker — sets min stack pointer, stack below is readable but not erasable |
+| `;` | stack frame marker — sets min stack pointer, stack below readable but not erasable |
 
 #### Lambdas
 ```
->OP>              // operator as data, single op
->a0 a1 ADD>       // closure with positional args a0 a1
-4 p3ow            // apply: expands positional args left to right
+>OP>                // operator as data, single op
+>a0 a1 ADD>         // closure with positional args
+4 p3ow              // apply: expands positional args left to right
 ```
 
 ---
@@ -69,38 +96,39 @@ Push directly onto stack.
 
 `[` and `]` delimit scope blocks. Stack frame is saved on `[`, unwound on `]`.
 
-`^` propagates through scopes — if produced inside `[ ]`, the scope exits immediately and `^` continues outward.
+`^` reaching scope end exits scope and pushes `^` to parent stack.
 
 ```
 val IF [
-    5 0 DIV     // ^ here exits the IF block and stops the row
-    4 ENTITY_SECTOR_CEIL_Z_SET   // never fires
+    5 0 DIV         // ^ here, scope exits, ^ pushed to parent
+    4 API_CALL      // never fires
 ]
+// parent stack now has ^ on top
 ```
 
 ---
 
 ### Variables
 
+All variables default to `0`. No uninitialized errors.
+
 ```
 b a SET         // set a to b
 11 b SET        // set b to 11
-a:              // push value of a
+a:              // push value of a (0 if never set)
 b: 13 2 SUM     // dereference b, then sum
 INC b           // increment b in place
 ```
 
-SETV copies value (not reference):
+`SETV` copies value (not reference):
 ```
 b a SETV        // a = value of b
 ```
 
-SETL creates a named sequence from symbols:
+`SETL` creates a named sequence from symbols:
 ```
 a b flist SETL  // flist is sequence of symbols [a, b]
 ```
-
-No default values. Uninitialized symbols produce `^` when read.
 
 ---
 
@@ -121,11 +149,11 @@ No default values. Uninitialized symbols produce `^` when read.
 ```
 profile .shared
 profile .inst _ .components _ .count
-pos.x:          // dereference field x of pos
-3 pos.x SET     // write 3 to field x of pos
+pos.x:              // dereference field x of pos
+3 pos.x SET         // write 3 to field x of pos
 ```
 
-User-defined variables do not support `.` property syntax. Attempting it produces `^`.
+User-defined variables do not support `.` syntax. Attempting it produces `^`.
 
 ---
 
@@ -145,7 +173,8 @@ val SW [
 val SWEQ [
     5    "five"  PRIN 1
     7    "seven" PRIN 1
-    _    "else"  PRIN 1
+    ^    "error" PRIN 1
+    _    "else"  PRIN 1  // using placeholder as 'anything else'
 ]
 ```
 
@@ -159,7 +188,8 @@ a b SUB     // a - b
 a b MUL     // a * b
 a b DIV     // a / b  — produces ^ if b is 0
 a b POW     // a ^ b
-INC a       // a = a + 1
+a SQRT      // produces ^ if a < 0
+a INC     // a = a + 1
 a b ADDv    // b = a + b  (in-place)
 ```
 
@@ -171,11 +201,13 @@ a b ADDv    // b = a + b  (in-place)
 a b AND
 a b OR
 NOT a
-a b EQ
-a b NEQ
+a b EQ      // handles ^ on either side
+a b NEQ     // handles ^ on either side
 a b IFG     // if a > b, output a, else ^
 a b IFL     // if a < b, output a, else ^
 IFT         // if top of stack is truthy, continue, else ^
+a ISOK      // 1 if a is not ^, 0 if a is ^
+a SAFE   // 0 if a is ^, a if a is not ^
 ```
 
 ---
@@ -183,8 +215,8 @@ IFT         // if top of stack is truthy, continue, else ^
 ### List / Sequence Operators
 
 ```
-a b c sA SETL       // create sequence sA from symbols
-sA APD c:           // append value of c to sA
+a b c sA SETL
+sA APD c:
 sA sB ISECT
 sA sB UNION
 sA sB SUBT
@@ -231,8 +263,6 @@ val IF [
 1 3 RANGE
 ```
 
-`^` inside any control structure exits that structure immediately and propagates outward.
-
 ---
 
 ### Concatenation
@@ -240,10 +270,10 @@ val IF [
 ```
 1 2 3 sA SET
 a b 5 sB SET
-a b CAT // ab
-7 1 CAT //71
-sA: sB: CAT // [1 2 3 a b 5]
-sym DECAT // s y m
+a b CAT ab
+7 1 CAT 71
+sA: sB: CAT [1 2 3 a b 5]
+sym DECAT
 sA: GLUE 123
 ```
 
@@ -273,13 +303,13 @@ from to time setter TWEENa_ tw SET
 Four panes: **Code | Runtime | Stack | Variables**
 
 ```
-code              | runtime            | stack
-3 a SET           | 3 a SET a          | a
-a: _ 7 SUM _ b SET| a: 3 7 SUM 10 b SET| b 7 1
-5 0 DIV _ c SET   | 5 0 DIV ^          | (unchanged)
+code              | runtime              | stack
+3 a SET           | 3 a SET              | a=3
+a: _ 7 SUM _ b SET| a: 3 7 SUM 10 b SET  | b=10
+5 0 DIV _ c SET   | 5 0 DIV ^            | (unchanged)
 ```
 
-`^` shown in runtime column at the point execution stopped.
+`^` shown in runtime column at point execution stopped. Variables panel shows `^` for any variable holding the sentinel.
 
 ---
 
