@@ -159,8 +159,77 @@ ENT_GET_SECT: _ sec SET
 API_SET_CEIL_Z_AT_SEC sec _0 _ setter SET // creates lambda
 
 a SW
-open. tw: _ ; dl: _ NOT _ ; PROD _ IFT | from to time setter TWEEN _ tw SET _ 0.34 DELAY _ dly SET | tw PSTOP
+open. tw: _ ; dl: _ NOT _ ; PROD _ IFT | from to time setter TWEENa_ tw SET _ 0.34 DELAY _ dly SET | tw PSTOP
 lock. islocked FLIPv
 stop. tw PSTOP
+
+
+// implicit setters
+2 from 
+1 to
+0.4 sec
+&ENTITY_COLOR_A_SET setter
+TWEEN _ tw SET // TWEEN uses named arguments from variables.
+
+& /0 ENTITY_PAL_GET . 7 EQ . filter SET // lambda wrapped in [& .. varname SET]
+ENTITY_PAL_GET 7 EQ filter SET // implicit insertion of results. unwraps to: /0 ENTITY_PAL_GET . 7 EQ . filter SET
+    
+// MATH SETS. list is a sequence of elements.   we dont distinguish sets and list in memory. 
+// equals always compares whatever it sees 1 x SET; x == x;	x: == x false ; 1 != x
+// Key datatypes:
+// literal - numbers or engine objects. engine object displayed as #TypeName
+// symbol - any lowercase word
+// list - sequence of any above.
+// nested lists are allowed. [a b [c d] e]
+// invalid arguments are always downplayed to -0 minus zero:  3 [a b] SUM > sum treats them as 3 0, and result is 3.
+// no nulls. all symbols are automatically set to -0 minus zero.
+	
+a b c sA SETL
+c d e sB SETL
+//mset operations are just symbolic comparisons.//
+sA sB ISECT [c]
+sA sB UNION [a b c d e]
+sA sB SUBT [d e]
+a sB HAS 0
+[a c] sB HASANY 1
+[a c] sB HASALL 0
+// ============ LISTS
+
+
+a sA AGGEQ 1 // aggregate on equals.
+1 2 ADD _ exp SET 7 base SET base exp POW  
+v1 v2 ADD _ exp SET; 7 base SET; base exp POW _ pwed SET;
+[a b c d] [1 2 3 4] li SET; // lists retain visual order li0 is [a b c d]
+li1 /SUM AGG 10 // Aggregate reduces list to a single non-list output.
+li1 /MIN AGG 1
+li1 /MAXDEX AGG 3 // max index
+li1 /MAXDEX AGG 
+li1 /SUM PAGG [3 7] // PAGG = pairwise parallel aggregation. returns list.
+[1 1 1 1 1] /SUM PAGG [2 2 1] // on odd, retains last element.
+li1 /SUM PREDUCE // parallel reduce using threads. 
+>1 ADD> adder SET // linear lambda. arrows signify input and output.
+
+li1 adder FILTER [2 3 4 5]
+li1 >1 ADD> FILTER [2 3 4 5] // same
+[a b c d] [0 0 1] PICK [a a b]
+
+
+>3 a0 POW> p3ow SET // lambda with positional argument; a0 a1 are reserved.
+4 p3ow // expands into 3 4 POW
+
+// =============== CONCATENATION
+2 a SET
+7 ab SET
+a b CAT ab : 7
+7 1 CAT 71
+[a b] c CAT [a b c]
+[a b] [c d] CAT [a b c d]
+
+abcd DECAT [a b c d]
+[a b c d] GLUE abcd
+[a ab 3 1] /: FILTER [2 7 3 1]				
+
+
+
 
 
