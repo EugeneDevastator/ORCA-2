@@ -8,6 +8,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.selection import SelectionType
 import re
 
 # ── Console ───────────────────────────────────────────────────────────────────
@@ -98,12 +99,11 @@ def tokenize(line):
         i = j
     return tokens
 
-# ── Syntax Lexer (plugs into BufferControl) ───────────────────────────────────
+# ── Syntax Lexer ──────────────────────────────────────────────────────────────
 def lex_raw_line(raw):
-    """Returns list of (style_str, text) for one raw source line."""
     result = []
     ci = raw.find('//')
-    code_part   = raw[:ci] if ci >= 0 else raw
+    code_part    = raw[:ci] if ci >= 0 else raw
     comment_part = raw[ci:] if ci >= 0 else ''
     s = code_part
     i = 0
@@ -136,12 +136,10 @@ def lex_raw_line(raw):
     return result
 
 class StackLexer(Lexer):
-    """prompt_toolkit Lexer — lex_document returns a callable(lineno) -> tokens."""
     def lex_document(self, document):
         lines = document.lines
         def get_line(lineno):
-            if lineno >= len(lines):
-                return []
+            if lineno >= len(lines): return []
             return lex_raw_line(lines[lineno])
         return get_line
 
@@ -280,17 +278,14 @@ def op_deref_op(stack, env, rt):
     if top is None: rt.append(rt_err(':!')); return
     if top[0] == 'sym':
         val = env.get(top[1], top)
-        stack.append(val)
-        rt.append(rt_val(val_str(val)))
+        stack.append(val); rt.append(rt_val(val_str(val)))
     else:
-        stack.append(top)
-        rt.append(rt_val(val_str(top)))
+        stack.append(top); rt.append(rt_val(val_str(top)))
 
 def op_underscore(stack, env, rt):
     top = stack.pop() if stack else None
     if top is None: rt.append(rt_err('_!')); return
-    stack.append(top)
-    rt.append(rt_val(val_str(top)))
+    stack.append(top); rt.append(rt_val(val_str(top)))
 
 OP_MAP = {
     'SET':   op_set,   'SETV': op_setv,  'SETL': op_setl, 'SETL*': op_setl,
@@ -401,6 +396,117 @@ def exec_tok(tok, stack, env, rt):
     if handler: handler(stack, env, rt); return
     rt.append(rt_err(op + '?'))
 
+# ── Token navigation helpers ──────────────────────────────────────────────────
+def get_token_spans_on_row(text, row):
+    """Return list of (start_col, end_col) for tokens on row (0-based cols)."""
+    lines = text.split('\n')
+    if row >= len(lines):
+        return []
+    line = lines[row]
+    ci = line.find('//')
+    code = line[:ci] if ci >= 0 else line
+    spans = []
+    i = 0
+    while i < len(code):
+        while i < len(code) and code[i] == ' ':
+            i += 1
+        if i >= len(code):
+            break
+        if code[i] == '"':
+            j = i + 1
+            while j < len(code) and code[j] != '"':
+                j += 1
+            spans.append((i, j + 1))
+            i = j + 1
+            continue
+        j = i
+        while j < len(code) and code[j] != ' ':
+            j += 1
+        spans.append((i, j))
+        i = j
+    return spans
+
+def row_start_offset(text, row):
+    lines = text.split('\n')
+    off = 0
+    for i in range(row):
+        off += len(lines[i]) + 1
+    return off
+
+def all_token_abs_spans(text):
+    """Return list of (abs_start, abs_end) for every token in text."""
+    result = []
+    lines = text.split('\n')
+    off = 0
+    for r, line in enumerate(lines):
+        for s, e in get_token_spans_on_row(text, r):
+            result.append((off + s, off + e))
+        off += len(line) + 1
+    return result
+
+def move_token(buf, direction):
+    """Move to prev(-1) or next(+1) token and select it."""
+    text = buf.text
+    tokens = all_token_abs_spans(text)
+    if not tokens:
+        return
+    abs_cur = buf.document.cursor_position
+
+    # find which token cursor is currently inside
+    cur_idx = None
+    for i, (s, e) in enumerate(tokens):
+        if s <= abs_cur < e:
+            cur_idx = i
+            break
+
+    if cur_idx is None:
+        # not inside any token — find nearest
+        if direction > 0:
+            for i, (s, e) in enumerate(tokens):
+                if s >= abs_cur:
+                    cur_idx = i
+                    break
+            if cur_idx is None:
+                cur_idx = len(tokens) - 1
+        else:
+            cur_idx = 0
+            for i, (s, e) in enumerate(tokens):
+                if e <= abs_cur:
+                    cur_idx = i
+
+    target = max(0, min(len(tokens) - 1, cur_idx + direction))
+    ts, te = tokens[target]
+
+    buf.exit_selection()
+    buf.set_document(Document(text, ts), bypass_readonly=False)
+    buf.start_selection(selection_type=SelectionType.CHARACTERS)
+    buf.set_document(Document(text, te), bypass_readonly=False)
+
+def select_token_at_cursor(buf):
+    """Select token at/nearest-right of cursor."""
+    text = buf.text
+    tokens = all_token_abs_spans(text)
+    if not tokens:
+        return
+    abs_cur = buf.document.cursor_position
+    chosen = None
+    for s, e in tokens:
+        if s <= abs_cur < e:
+            chosen = (s, e)
+            break
+    if chosen is None:
+        for s, e in tokens:
+            if s >= abs_cur:
+                chosen = (s, e)
+                break
+    if chosen is None:
+        chosen = tokens[-1]
+    ts, te = chosen
+    buf.exit_selection()
+    buf.set_document(Document(text, ts), bypass_readonly=False)
+    buf.start_selection(selection_type=SelectionType.CHARACTERS)
+    buf.set_document(Document(text, te), bypass_readonly=False)
+
 # ── UI state ──────────────────────────────────────────────────────────────────
 state = {'S': None, 'status': 'Ready.'}
 focused_panel = [0]
@@ -429,7 +535,10 @@ END
 s: LOG
 flist: LOG"""
 
-code_buf = Buffer(name='code', multiline=True)
+code_buf = Buffer(
+    name='code',
+    multiline=True,
+)
 code_buf.set_document(Document(DEMO))
 
 # ── Panel text getters ────────────────────────────────────────────────────────
@@ -541,11 +650,10 @@ style = Style.from_dict({
     'status.help':    'bg:#cccccc #555555',
 })
 
-# ── Buffers for read-only panels (needed for mouse focus) ─────────────────────
+# ── Buffers for read-only panels ──────────────────────────────────────────────
 runtime_buf = Buffer(name='runtime', read_only=True)
 stack_buf   = Buffer(name='stack',   read_only=True)
 vars_buf    = Buffer(name='vars',    read_only=True)
-console_buf_ro = console_buf  # already defined above
 
 _PANEL_BUFS = [code_buf, runtime_buf, stack_buf, vars_buf]
 _BUF_TO_IDX = {'code': 0, 'runtime': 1, 'stack': 2, 'vars': 3}
@@ -559,10 +667,11 @@ def make_title(idx, name):
         return [(st, marker + name + marker)]
     return FormattedTextControl(get, focusable=False)
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-def pw(i): return D(preferred=panel_widths[i], min=PANEL_MIN)
+# ── Layout — fixed widths ─────────────────────────────────────────────────────
+def pw(i):
+    w = panel_widths[i]
+    return D(min=w, max=w, preferred=w)
 
-# Code: BufferControl with our custom Lexer — editing + highlighting in one.
 col0 = HSplit([
     Window(make_title(0, 'Code'), height=1),
     Window(
@@ -571,26 +680,23 @@ col0 = HSplit([
     ),
 ], width=lambda: pw(0))
 
-# Runtime: FormattedTextControl (read-only display) + thin focusable strip.
 col1 = HSplit([
     Window(make_title(1, 'Runtime'), height=1),
     Window(FormattedTextControl(get_runtime_text, focusable=False), wrap_lines=False),
     Window(BufferControl(buffer=runtime_buf, focusable=True), height=1),
 ], width=lambda: pw(1))
 
-# Stack
 col2 = HSplit([
     Window(make_title(2, 'Stack'), height=1),
     Window(FormattedTextControl(get_stack_text, focusable=False), wrap_lines=False),
     Window(BufferControl(buffer=stack_buf, focusable=True), height=1),
 ], width=lambda: pw(2))
 
-# Vars
 col3 = HSplit([
     Window(make_title(3, 'Vars'), height=1),
     Window(FormattedTextControl(get_vars_text, focusable=False), wrap_lines=False),
     Window(BufferControl(buffer=vars_buf, focusable=True), height=1),
-])
+], width=lambda: pw(3))
 
 layout = Layout(
     HSplit([
@@ -643,25 +749,64 @@ def _(e):
     set_status(PANEL_NAMES[p] + ' w=' + str(panel_widths[p]))
     e.app.invalidate()
 
-# ── Focus sync (mouse clicks update focused_panel) ────────────────────────────
-def sync_focus(app):
+# ── Arrow keys: token navigation (code panel only) ────────────────────────────
+@kb.add('left')
+def _(e):
+    if focused_panel[0] != 0:
+        return
+    move_token(code_buf, -1)
+    e.app.invalidate()
+
+@kb.add('right')
+def _(e):
+    if focused_panel[0] != 0:
+        return
+    move_token(code_buf, +1)
+    e.app.invalidate()
+
+@kb.add('up')
+def _(e):
+    if focused_panel[0] != 0:
+        return
+    code_buf.cursor_up()
+    select_token_at_cursor(code_buf)
+    e.app.invalidate()
+
+@kb.add('down')
+def _(e):
+    if focused_panel[0] != 0:
+        return
+    code_buf.cursor_down()
+    select_token_at_cursor(code_buf)
+    e.app.invalidate()
+
+# ── Ctrl+Z undo ───────────────────────────────────────────────────────────────
+@kb.add('c-z')
+def _(e):
+    if focused_panel[0] == 0:
+        code_buf.undo()
+        e.app.invalidate()
+
+# ── Focus sync ────────────────────────────────────────────────────────────────
+def on_render(app):
     try:
         buf = app.layout.current_buffer
         if buf is not None:
             idx = _BUF_TO_IDX.get(buf.name)
             if idx is not None and focused_panel[0] != idx:
                 focused_panel[0] = idx
-                set_status('panel: ' + PANEL_NAMES[idx])
     except Exception:
         pass
 
-# ── Run ───────────────────────────────────────────────────────────────────────
+# ── Application ───────────────────────────────────────────────────────────────
 app = Application(
     layout=layout,
     key_bindings=kb,
     style=style,
     full_screen=True,
-    mouse_support=True,
+    mouse_support=False,
 )
-app.after_render += sync_focus
-app.run()
+app.after_render += on_render
+
+if __name__ == '__main__':
+    app.run()

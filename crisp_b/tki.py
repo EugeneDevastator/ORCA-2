@@ -39,7 +39,13 @@ a: b: flist SETL
     c: b SET
 END
 s: LOG
-flist: LOG"""
+flist: SUM _ 
+1 from 
+2 to
+0.5 over
+ENTITY_POS_X setter
+& from: to: over: setter: TWEEN _ twdo SET
+"""
 
 BG             = "#f8f8f8"
 FG             = "#222222"

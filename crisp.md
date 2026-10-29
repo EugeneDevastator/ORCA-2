@@ -1,3 +1,11 @@
+todo list:
+- state machines
+- wait
+- event wait
+- coroutines
+- ecs baseline
+- serialized paused state
+
 a SWITCH
 	usd _ 5
 	eur _ 4 a SET

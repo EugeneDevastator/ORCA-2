@@ -1,3 +1,11 @@
+todo list:
+- state machines
+- wait
+- event wait
+- coroutines
+- ecs baseline
+- serialized paused state
+
     ## Crisp Language Spec v1.7
 
     language primarily oriented as scripting for games and programs.
